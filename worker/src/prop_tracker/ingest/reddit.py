@@ -32,10 +32,12 @@ def _build_input(subreddits: tuple[str, ...]) -> dict[str, Any]:
         for sr in subreddits
         if sr.strip()
     ]
+    # scrollTimeout dominates total runtime on the free Apify plan; keep it
+    # short (10s) so even 5 subreddits finishes in ~1 min instead of 4+ min.
     return {
         "startUrls": start_urls,
         "maxItems": PER_SUBREDDIT_LIMIT * max(len(start_urls), 1),
-        "scrollTimeout": 40,
+        "scrollTimeout": int(_os.environ.get("INGEST_SCROLL_TIMEOUT", "10")),
         "skipComments": True,
         "skipUserPosts": True,
         "skipCommunity": True,
