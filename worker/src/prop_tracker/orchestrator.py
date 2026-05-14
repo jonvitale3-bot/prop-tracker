@@ -49,8 +49,13 @@ def main() -> None:
         cycle_start = time.monotonic()
         log.info("orchestrator: --- cycle start ---")
 
-        from .ingest import reddit as ingest_reddit  # noqa: PLC0415
+        # Use Reddit's public JSON API directly (no Apify dependency).
+        # Set INGEST_REDDIT_BACKEND=apify to fall back to the trudax actor.
         from . import parse  # noqa: PLC0415
+        if os.environ.get("INGEST_REDDIT_BACKEND", "direct").lower() == "apify":
+            from .ingest import reddit as ingest_reddit  # noqa: PLC0415
+        else:
+            from .ingest import reddit_direct as ingest_reddit  # noqa: PLC0415
         _safe("ingest-reddit", ingest_reddit.run)
         _safe("parse-mentions", parse.run)
 
