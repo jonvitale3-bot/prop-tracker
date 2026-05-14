@@ -38,7 +38,8 @@ def ingest_twitter() -> None:
 
 def parse_mentions() -> None:
     _bootstrap()
-    raise SystemExit("parse-mentions: not yet implemented (milestone 4)")
+    from . import parse as _p  # noqa: PLC0415
+    _p.run()
 
 
 def grade_results() -> None:
