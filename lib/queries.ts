@@ -39,7 +39,9 @@ export function todayET(): string {
 }
 const todayISO = todayET;
 
-export async function getTonightsPlays(): Promise<PlayRow[]> {
+export async function getTonightsPlays(minMentions: number = 2): Promise<PlayRow[]> {
+  // minMentions filter drops "lone wolf" picks (single tweets). public_pct is
+  // meaningless until at least a couple people weigh in on the same bet.
   const today = todayISO();
   const rows = (await sql`
     SELECT id, sport, game_date::text AS game_date, subject, subject_kind,
@@ -47,9 +49,46 @@ export async function getTonightsPlays(): Promise<PlayRow[]> {
            public_pct::float8 AS public_pct, avg_conviction::float8 AS avg_conviction
     FROM plays
     WHERE game_date = ${today}
+      AND mention_count >= ${minMentions}
     ORDER BY mention_count DESC, avg_conviction DESC NULLS LAST, id DESC
     LIMIT 100
   `) as unknown as PlayRow[];
+  return rows;
+}
+
+export type HotSubject = {
+  sport: string;
+  subject: string;
+  market: string;
+  side: string;
+  total_mentions: number;
+  distinct_lines: number;
+  min_line: number | null;
+  max_line: number | null;
+  avg_conviction: number | null;
+};
+
+/**
+ * Looser aggregation: ignore the specific line so "Tatum o27.5" and "Tatum o28.5"
+ * get combined. Surfaces consensus on a *direction* (subject + market + side)
+ * even when posters disagree on the exact number.
+ */
+export async function getHotSubjects(minMentions: number = 3): Promise<HotSubject[]> {
+  const today = todayISO();
+  const rows = (await sql`
+    SELECT sport, subject, market, side,
+           SUM(mention_count)::int AS total_mentions,
+           COUNT(DISTINCT line)::int AS distinct_lines,
+           MIN(line)::float8 AS min_line,
+           MAX(line)::float8 AS max_line,
+           AVG(avg_conviction)::float8 AS avg_conviction
+    FROM plays
+    WHERE game_date = ${today}
+    GROUP BY sport, subject, market, side
+    HAVING SUM(mention_count) >= ${minMentions}
+    ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
+    LIMIT 50
+  `) as unknown as HotSubject[];
   return rows;
 }
 
