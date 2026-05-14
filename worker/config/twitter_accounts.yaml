@@ -1,71 +1,138 @@
+# Twitter handles to scrape, grouped by tier.
+#
+# Schema:
+#   handle:                X username without the @
+#   tier:                  1=sharps, 2=public picks, 3=brands, 4=analysts
+#   sport_focus:           multi | nba | mlb
+#   active:                true  -> scraped each cycle
+#                          false -> kept in YAML for audit / future use only
+#   produces_inline_picks: true  -> picks appear in tweet text (parser-friendly)
+#                          false -> picks live behind sportsbook share URLs
+#   notes:                 free-form
+#
+# History: v1 keyword search caught random gambling Twitter noise.
+# v2 handle scrape was structured but most signal came from Tier 3 brands.
+# Phase 1 of the v3 pivot: keep brands active, deactivate everything else
+# (kept on disk for audit and the future line-movement work). Reactivate
+# any tier if Phase 2 surfaces a use case.
+
 accounts:
-  # Tier 1 - Sharps (cross-reference signal, not fade material)
+  # ── Tier 1: SHARPS — kept for context, NOT actively scraped ──
   - handle: capjack2000
     tier: 1
     sport_focus: multi
-    notes: Captain Jack Andrews, founded Unabated
+    active: false
+    produces_inline_picks: false
+    notes: Captain Jack Andrews, Unabated. Posts thoughts, not picks.
   - handle: haralabob
     tier: 1
     sport_focus: nba
-    notes: NBA specialist, sharp
-  - handle: AlexMonahan100
+    active: false
+    produces_inline_picks: false
+    notes: NBA specialist; rarely posts structured picks.
+  - handle: Amonahan
     tier: 1
     sport_focus: multi
-    notes: Former SIG quant
+    active: false
+    produces_inline_picks: false
+    notes: Former SIG quant. (Twitter resolves AlexMonahan100 -> Amonahan.)
   - handle: ToddFuhrman
     tier: 1
     sport_focus: multi
-    notes: Former Caesars oddsmaker
+    active: false
+    produces_inline_picks: false
+    notes: Former Caesars oddsmaker. Multi-sport commentary.
   - handle: robpizzola
     tier: 1
     sport_focus: multi
-    notes: Pro bettor, Circles Off podcast
+    active: false
+    produces_inline_picks: false
+    notes: Pro bettor / Circles Off podcast.
 
-  # Tier 2 - High-volume public picks (fade candidates)
+  # ── Tier 2: PUBLIC PICK ACCOUNTS — picks behind URLs, DEACTIVATED ──
+  # 1 play produced in entire history; not worth the Apify + parser cost.
+  # Kept here so we can reactivate when we want URL-following / sentiment.
   - handle: jimmysportpicks
     tier: 2
     sport_focus: multi
-    notes: 200K+ followers, daily free picks
+    active: false
+    produces_inline_picks: false
+    notes: 200K+ followers. Daily parlay share links, no inline picks.
   - handle: tmathsports
     tier: 2
     sport_focus: multi
-    notes: 200K+ followers
+    active: false
+    produces_inline_picks: false
   - handle: dangambleai
     tier: 2
     sport_focus: multi
-    notes: 330K+ followers
+    active: false
+    produces_inline_picks: false
+    notes: GameScript links; picks hidden behind URLs.
   - handle: catburglarpicks
     tier: 2
     sport_focus: multi
-    notes: Daily free picks
+    active: false
+    produces_inline_picks: false
   - handle: HeedTheseTakes
     tier: 2
     sport_focus: multi
-    notes: Gambling Twitter mainstay
+    active: false
+    produces_inline_picks: false
 
-  # Tier 3 - Brands/aggregators
+  # ── Tier 3: BRANDS — ACTIVE, the workhorses ──
   - handle: ActionNetworkHQ
     tier: 3
     sport_focus: multi
+    active: true
+    produces_inline_picks: true
+    notes: Highest-volume parseable signal. Structured "BEST BET" template.
+  - handle: Covers
+    tier: 3
+    sport_focus: multi
+    active: true
+    produces_inline_picks: true
+    notes: Line-tracking + best-bet references. ~9% structured rate.
   - handle: OddsShark
     tier: 3
     sport_focus: multi
-  - handle: CoversExperts
-    tier: 3
-    sport_focus: multi
+    active: true
+    produces_inline_picks: true
   - handle: ScoresOdds
     tier: 3
     sport_focus: multi
-  - handle: VegasInsider
+    active: true
+    produces_inline_picks: true
+    notes: Picks of the day with results / grading.
+  - handle: BettingPros
     tier: 3
     sport_focus: multi
+    active: true
+    produces_inline_picks: true
+    notes: Light-signal but inline picks. ~2% structured rate.
+  - handle: VSiNLive
+    tier: 3
+    sport_focus: multi
+    active: true
+    produces_inline_picks: true
+    notes: Strong structured rate (~34%). Best-bets across all sports.
+  - handle: TheLinesUS
+    tier: 3
+    sport_focus: multi
+    active: true
+    produces_inline_picks: true
+    notes: Best inline-pick rate seen (~39%). Prop bullets with target emoji.
 
-  # Tier 4 - NBA-specific
-  - handle: Hardwood_Paroxysm
-    tier: 4
-    sport_focus: nba
-    notes: Action Network NBA writer
-  - handle: erinkatedolan
-    tier: 4
-    sport_focus: nba
-    notes: ESPN betting analyst
+  # ── REMOVED / NOT KEPT ──
+  # Pickswise           - 9% structured but mostly brand-collab promotion, not actual picks
+  # CBSSportsHQ         - NFL draft chatter, no betting content
+  # VegasInsider        - zero volume across multiple tests
+  # CoversExperts       - superseded by @Covers (main brand handle)
+  # Hardwood_Paroxysm   - zero volume
+  # erinkatedolan       - zero volume
+  # BetQL / BetQL_      - zero volume on both variants
+  # actionhowie / ActionHowie - zero volume; account may not exist
+  # NBABets             - explicit drop, account may not exist
+  # TheLines (no US)    - zero volume; @TheLinesUS works instead
+  # VSiN (no Live)      - zero volume; @VSiNLive works instead
+  # AlexMonahan100      - Twitter resolves to @Amonahan; kept under that handle

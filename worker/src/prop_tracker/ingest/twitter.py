@@ -52,22 +52,36 @@ _ACCOUNTS_PATH = Path(__file__).resolve().parents[3] / "config" / "twitter_accou
 # ── account config ────────────────────────────────────────────
 
 def _load_accounts() -> list[dict[str, Any]]:
+    """Load accounts from YAML, returning only ones flagged active: true.
+
+    `active` defaults to True if the field is absent (back-compat with the
+    v2 YAML that had no flag). Set `active: false` to keep an entry on
+    disk for audit / future re-activation without scraping it each cycle.
+    """
     if not _ACCOUNTS_PATH.exists():
         raise RuntimeError(f"Twitter accounts file not found: {_ACCOUNTS_PATH}")
     with _ACCOUNTS_PATH.open() as f:
         data = yaml.safe_load(f) or {}
     accounts = data.get("accounts") or []
     out: list[dict[str, Any]] = []
+    skipped = 0
     for a in accounts:
         h = (a.get("handle") or "").strip().lstrip("@")
         if not h:
+            continue
+        if a.get("active", True) is False:
+            skipped += 1
             continue
         out.append({
             "handle": h,
             "tier": int(a.get("tier") or 0) or None,
             "sport_focus": a.get("sport_focus"),
             "notes": a.get("notes"),
+            "produces_inline_picks": bool(a.get("produces_inline_picks", True)),
         })
+    if skipped:
+        log.info("Twitter accounts: loaded %d active, %d skipped (active: false)",
+                 len(out), skipped)
     return out
 
 
