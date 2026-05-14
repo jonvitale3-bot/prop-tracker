@@ -42,6 +42,7 @@ const todayISO = todayET;
 export async function getTonightsPlays(minMentions: number = 2): Promise<PlayRow[]> {
   // minMentions filter drops "lone wolf" picks (single tweets). public_pct is
   // meaningless until at least a couple people weigh in on the same bet.
+  // subject_kind='player' filters out moneyline / spread / total team bets.
   const today = todayISO();
   const rows = (await sql`
     SELECT id, sport, game_date::text AS game_date, subject, subject_kind,
@@ -49,6 +50,7 @@ export async function getTonightsPlays(minMentions: number = 2): Promise<PlayRow
            public_pct::float8 AS public_pct, avg_conviction::float8 AS avg_conviction
     FROM plays
     WHERE game_date = ${today}
+      AND subject_kind = 'player'
       AND mention_count >= ${minMentions}
     ORDER BY mention_count DESC, avg_conviction DESC NULLS LAST, id DESC
     LIMIT 100
@@ -74,6 +76,7 @@ export type HotSubject = {
  * even when posters disagree on the exact number.
  */
 export async function getHotSubjects(minMentions: number = 3): Promise<HotSubject[]> {
+  // Player props only. Team markets (spread/total/moneyline) are excluded.
   const today = todayISO();
   const rows = (await sql`
     SELECT sport, subject, market, side,
@@ -84,6 +87,7 @@ export async function getHotSubjects(minMentions: number = 3): Promise<HotSubjec
            AVG(avg_conviction)::float8 AS avg_conviction
     FROM plays
     WHERE game_date = ${today}
+      AND subject_kind = 'player'
     GROUP BY sport, subject, market, side
     HAVING SUM(mention_count) >= ${minMentions}
     ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
