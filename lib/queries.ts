@@ -47,6 +47,14 @@ export async function getTonightsPlays(
   // includeKeyword=true brings in the legacy keyword-search data.
   // subject_kind='player' filters out moneyline / spread / total team bets.
   // mention_count is recomputed from the filtered mention set.
+  //
+  // Two additional filters since the game_date fix:
+  //   1) legacy_game_date = FALSE — drop plays parsed before the
+  //      ET-anchor fix; their game_date is typically +1 day off.
+  //   2) NOT EXISTS (results) — drop plays that have already been
+  //      graded so a finished game doesn't linger in "tonight."
+  //      (Cheaper than a game_status column; revisit when we have
+  //      in_progress data from the Odds API integration.)
   const today = todayISO();
   const rows = includeKeyword
     ? ((await sql`
@@ -59,6 +67,8 @@ export async function getTonightsPlays(
         JOIN play_mentions pm ON pm.play_id = p.id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
+          AND p.legacy_game_date = FALSE
+          AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.id
         HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
         ORDER BY mention_count DESC, p.avg_conviction DESC NULLS LAST, p.id DESC
@@ -75,7 +85,9 @@ export async function getTonightsPlays(
         JOIN mentions m ON m.id = pm.mention_id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
+          AND p.legacy_game_date = FALSE
           AND m.source_method = 'handle_scrape'
+          AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.id
         HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
         ORDER BY mention_count DESC, p.avg_conviction DESC NULLS LAST, p.id DESC
@@ -106,6 +118,7 @@ export async function getHotSubjects(
   includeKeyword: boolean = false,
 ): Promise<HotSubject[]> {
   // Player props only. Default to handle_scrape data; toggle via includeKeyword.
+  // Same legacy + finished-game filters as getTonightsPlays.
   const today = todayISO();
   const rows = includeKeyword
     ? ((await sql`
@@ -119,6 +132,8 @@ export async function getHotSubjects(
         JOIN play_mentions pm ON pm.play_id = p.id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
+          AND p.legacy_game_date = FALSE
+          AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.sport, p.subject, p.market, p.side
         HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
         ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
@@ -136,7 +151,9 @@ export async function getHotSubjects(
         JOIN mentions m ON m.id = pm.mention_id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
+          AND p.legacy_game_date = FALSE
           AND m.source_method = 'handle_scrape'
+          AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.sport, p.subject, p.market, p.side
         HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
         ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST

@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import anthropic
 from anthropic import APIError
@@ -27,6 +28,12 @@ from .db import connect
 from .prefilter import should_skip as prefilter_should_skip
 
 log = logging.getLogger(__name__)
+
+# All game_date resolution is anchored to the post's ET calendar date.
+# Brand accounts post in US Eastern; the parser must NOT use server-local
+# (UTC on Railway) date.today() as the anchor — that drifts +1 day for
+# any tweet posted after ~8pm ET.
+ET = ZoneInfo("America/New_York")
 
 DEFAULT_BATCH_LIMIT = 200
 
@@ -167,8 +174,6 @@ extract all of them. Each becomes its own play object in the array.
     * If ambiguous (line between 3 and 5 with no role hint), default to
       strikeouts_pitcher (more common bet type), and set market_explicit=false.
 
-- "tonight", "today", "ce soir" → use the provided current date as game_date.
-
 - Only NBA and MLB. Other sports (NHL, NFL, PGA, soccer, college) → ignore.
   If a post mixes NBA/MLB picks with non-NBA/MLB picks, extract only the
   NBA/MLB ones.
@@ -182,8 +187,51 @@ extract all of them. Each becomes its own play object in the array.
 - raw_quote: copy the exact phrase from the post that constitutes the
   pick. Do not paraphrase. If multiple picks, give each one its own quote.
 
-Today's date is __TODAY_ISO__. Posts that say "tonight" or "today" refer
-to this date.
+═══════════════ GAME DATE RESOLUTION ═══════════════
+
+Anchor day = the calendar date of the post in US/Eastern (ET). This
+post's anchor day is __POSTED_ET_DATE__ and the post was made at hour
+__POSTED_ET_HOUR__ ET (0-23).
+
+Resolve game_date using these rules IN ORDER. Stop at the first one
+that matches.
+
+1. EXPLICIT FUTURE DAY REFERENCE
+   - "tomorrow" / "tomorrow's plays" / "tomorrow night"
+     → anchor day + 1.
+   - A weekday name ("Monday", "Tuesday", ...):
+     → the NEXT occurrence of that weekday strictly after the anchor day.
+       Exception: if the post says the same weekday as the anchor day
+       (e.g. posted Monday, says "Monday"), interpret as the anchor day
+       itself, not the following Monday.
+   - A specific date ("May 14", "5/14", "Thursday 5/15")
+     → that date.
+
+2. PRESENT-DAY REFERENCE
+   - "tonight" / "today" / "tonight's plays" / "today's plays"
+     → anchor day.
+   - Late-night "still tonight" exception: if __POSTED_ET_HOUR__ is
+     between 0 and 4 inclusive (midnight to 4:59am ET) and the post
+     says "tonight" / "tonight's plays", STILL use the anchor day. Do
+     not look back a day — the author's own calendar treats it as
+     "tonight."
+
+3. NO DAY REFERENCE
+   - Default to the anchor day. Covers the common case of a brand
+     account dropping a pick mid-afternoon without saying "tonight."
+
+4. AMBIGUOUS / MULTI-DAY → REJECT (return no play for that pick)
+   - OK to extract (single specific game; resolve via rules above):
+     "Game 5 picks", "Tonight's Game 5 best bet", "Padres-Brewers tonight"
+   - REJECT (multi-day or unresolvable):
+     "Game 5 or 6 picks", "this weekend's NBA card", "the next few days",
+     "Friday or Saturday", "TBD", "later this week", "this week's locks"
+   - Futures / season-long props ("Lakers to win the title",
+     "Judge over 50 HRs this season") → REJECT, no single game_date
+     applies.
+
+Always emit game_date as YYYY-MM-DD. Never invent a date that the post
+doesn't support — when in doubt between two possibilities, REJECT.
 
 Return JSON only.
 """
@@ -254,10 +302,21 @@ def _valid_play(p: dict[str, Any]) -> bool:
 def _call_claude(
     client: anthropic.Anthropic, model: str, text: str, posted_at: datetime
 ) -> dict[str, Any]:
-    today_iso = date.today().isoformat()
-    # Use str.replace not .format() because the prompt contains literal {} from
-    # the JSON example and Python's .format would mis-parse them.
-    system = _SYSTEM_PROMPT.replace("__TODAY_ISO__", today_iso)
+    # Anchor day = the calendar date of the post in US Eastern.
+    # posted_at is a TIMESTAMPTZ from psycopg → tz-aware. If anything ever
+    # comes through naive (shouldn't, but defensive), treat it as UTC.
+    if posted_at.tzinfo is None:
+        posted_at = posted_at.replace(tzinfo=timezone.utc)
+    posted_at_et = posted_at.astimezone(ET)
+    posted_et_date = posted_at_et.date().isoformat()
+    posted_et_hour = str(posted_at_et.hour)
+    # str.replace not .format() because the prompt contains literal {}
+    # from the JSON example and .format would mis-parse them.
+    system = (
+        _SYSTEM_PROMPT
+        .replace("__POSTED_ET_DATE__", posted_et_date)
+        .replace("__POSTED_ET_HOUR__", posted_et_hour)
+    )
     msg = client.messages.create(
         model=model,
         max_tokens=1024,

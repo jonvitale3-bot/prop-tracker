@@ -24,33 +24,13 @@ game — strictly worse than no polling. So:
 
 Until all three are done, Phase 2 stays on paper.
 
-### `game_date_unverified` column
+### `game_date_unverified` (see dedicated section below)
 
-```sql
-ALTER TABLE plays
-    ADD COLUMN game_date_unverified BOOLEAN NOT NULL DEFAULT FALSE;
-```
-
-Set to `TRUE` when the parser-assigned `game_date` cannot be matched
-against an Odds API event for `(sport, game_date, subject_team)`:
-
-* For team plays: no event exists where `subject` is one of the two
-  competitors.
-* For player plays: no event exists whose competitors' rosters contain
-  `subject`. (Roster lookup is best-effort; if we can't get a roster,
-  we leave `game_date_unverified = FALSE` rather than penalize
-  ambiguity — the team plays carry the strict check.)
-
-When `TRUE`:
-
-* **`poll_play` MUST return early without firing any odds calls.**
-* **`poll_due` MUST exclude these plays from its work queue.**
-* Dashboard hides them by default (filter `game_date_unverified = FALSE`).
-
-The flag is settable but not auto-cleared — if the parser later
-re-emits the same play with a corrected `game_date`, that's a NEW row
-in `plays` (different unique key). The bad row stays flagged for the
-audit trail.
+Full design is in "`game_date_unverified` — Odds-API-backed validation"
+later in this doc. Summary: every new play is validated against the
+day's Odds API events at parse time, and any play that can't be matched
+to a real game is quarantined from polling, the fade signal, and the
+dashboard.
 
 ## Goal
 
@@ -229,6 +209,64 @@ When a play has `polls_done >= 5` OR the game has tipped off, the row is
 deleted (we have all the snapshots we need; subsequent picks for the same
 event reuse the same `prop_lines` history).
 
+### `game_date_unverified` — Odds-API-backed validation
+
+```sql
+ALTER TABLE plays
+    ADD COLUMN game_date_unverified BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+**When validation runs:** at parse time, immediately after each play is
+extracted and before `play_mentions` is inserted. The check happens in
+the parser, not asynchronously — we want the flag set the moment a play
+becomes visible.
+
+**How the check works** (uses the same Odds API client introduced in
+step 2 of the implementation phases, with a small in-process cache so
+we don't re-fetch the day's event list for every play):
+
+1. Fetch the day's events for `sport` on `game_date` from the Odds API
+   (cached per `(sport, game_date)` for the duration of the parse run).
+2. **Team play** (`subject_kind = 'team'`): set `game_date_unverified =
+   FALSE` iff `subject` appears (case-insensitive substring or
+   alias-table lookup) as a competitor in any event for that day.
+   Otherwise `TRUE`.
+3. **Player play** (`subject_kind = 'player'`): the Odds API doesn't
+   give rosters. We fall back to a heuristic:
+   - If the source mention's `raw_text` names any team that's playing
+     that day → `FALSE` (the tweet itself attests to the matchup).
+   - Otherwise → `TRUE` (we can't verify; safer to flag than to poll
+     blindly).
+4. If the Odds API call itself fails (transient network / rate limit) →
+   set `FALSE` and log a warning. Don't penalize the play for our own
+   outage; the per-play poll will get another shot to set
+   `event_id`/`game_date_unverified` at first odds fetch.
+
+**Where it applies:**
+
+* **`worker/ingest/odds.py:poll_play(play_id)`** MUST short-circuit
+  with a single log line and zero API calls when
+  `plays.game_date_unverified = TRUE`.
+* **`worker/ingest/odds.py:poll_due()`** MUST exclude unverified plays
+  from its work queue (cheaper than re-checking inside `poll_play`).
+* **`play_fade_signal` VIEW** (below) MUST filter
+  `WHERE p.game_date_unverified = FALSE` — unverified plays never
+  become Pattern A/B/C candidates.
+* **Dashboard queries** MUST filter `p.game_date_unverified = FALSE`
+  (analogous to the existing `legacy_game_date` filter).
+
+**Lifecycle:** the flag is set once at parse time and never auto-cleared.
+If the parser later re-extracts the same pick with a corrected
+`game_date`, that becomes a NEW row in `plays` (different unique key).
+The bad row stays flagged for the audit trail; nothing modifies it.
+
+**Why not just drop the play?** Two reasons:
+1. Audit trail. We want to see how often validation fires so we can
+   tune the parser / aliases.
+2. Conservative recovery. A team-name typo in the parser ("Yankee" not
+   "Yankees") would orphan every play silently. With the flag we can
+   query `SELECT * FROM plays WHERE game_date_unverified` and notice.
+
 ### Reverse-line-movement view (Pattern A/B/C as a DB VIEW)
 
 Per Phase 2 sign-off: classification lives **in the database as a VIEW**,
@@ -283,6 +321,8 @@ FROM plays p
 JOIN play_mentions pm ON pm.play_id = p.id
 JOIN mentions m ON m.id = pm.mention_id
 WHERE m.source_method = 'handle_scrape'
+  AND p.legacy_game_date = FALSE          -- pre-fix bad-game_date plays
+  AND p.game_date_unverified = FALSE      -- Odds-API check failed
 GROUP BY p.id;
 ```
 
