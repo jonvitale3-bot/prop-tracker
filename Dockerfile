@@ -20,6 +20,9 @@ COPY worker/pyproject.toml worker/uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 COPY worker/src ./src
+# YAML configs (e.g., curated Twitter handles) are loaded at runtime from
+# worker/config/, so they must be copied into the image.
+COPY worker/config ./config
 RUN uv sync --frozen --no-dev
 
 # Apply migrations on boot, then drop into the orchestrator loop.
