@@ -17,12 +17,10 @@ WORKDIR /app/worker
 
 # Install deps first for cache friendliness, then the project itself.
 COPY worker/pyproject.toml worker/uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev
 
 COPY worker/src ./src
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 # Apply migrations on boot, then drop into the orchestrator loop.
 CMD ["sh", "-c", "uv run migrate && uv run worker-loop"]
