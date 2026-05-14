@@ -41,10 +41,11 @@ log = logging.getLogger(__name__)
 # Sharp accounts post a few times a day, public/brand accounts can post 50+.
 MAX_ITEMS_PER_HANDLE = int(os.environ.get("TWITTER_MAX_ITEMS_PER_HANDLE", "50"))
 
-# Twitter `since:YYYY-MM-DD` filter lookback window in days.
-# 2 days gives sharps (who don't tweet daily) a fair chance to show up.
-# Dedupe on tweet id means re-running over the same window is cheap.
-LOOKBACK_DAYS = int(os.environ.get("TWITTER_LOOKBACK_DAYS", "2"))
+# Twitter lookback window in hours. Twitter's `since:` operator is
+# date-precision only, so we compute `since:DATE` from (now - lookback)
+# and additionally drop any tweet older than the window post-fetch.
+# 12h keeps cost down while staying resilient to short outages.
+LOOKBACK_HOURS = int(os.environ.get("TWITTER_LOOKBACK_HOURS", "12"))
 
 _ACCOUNTS_PATH = Path(__file__).resolve().parents[3] / "config" / "twitter_accounts.yaml"
 
@@ -90,6 +91,26 @@ def _load_accounts() -> list[dict[str, Any]]:
 def _build_search_terms(handles: list[str], since: date) -> list[str]:
     iso = since.isoformat()
     return [f"from:{h} since:{iso}" for h in handles]
+
+
+def _drop_old(items: list[dict[str, Any]], cutoff: datetime) -> tuple[list[dict[str, Any]], int]:
+    """Filter items posted before `cutoff`. Returns (kept, dropped_count).
+    Apify charges per result returned, but downstream parser cost is per
+    *new* mention inserted — this filter drops Anthropic cost for items
+    inside the date window but outside the hours window."""
+    kept = []
+    dropped = 0
+    for it in items:
+        ts = it.get('createdAt') or it.get('created_at')
+        try:
+            posted = _parse_dt(ts)
+            if posted >= cutoff:
+                kept.append(it)
+            else:
+                dropped += 1
+        except Exception:
+            kept.append(it)  # if unparseable, keep it (let the normalizer decide)
+    return kept, dropped
 
 
 def _build_input(handles: list[str], since: date) -> dict[str, Any]:
@@ -223,10 +244,13 @@ def run() -> None:
     handles = [a["handle"] for a in accounts]
     tier_by_handle = {a["handle"].lower(): a["tier"] for a in accounts}
 
-    since = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).date()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    since = cutoff.date()  # date-precision for Twitter's `since:` operator
     log.info(
-        "Twitter ingest (handle_scrape): %d accounts, since=%s, max_per_handle=%d, actor=%s",
-        len(handles), since.isoformat(), MAX_ITEMS_PER_HANDLE, settings.apify_twitter_actor,
+        "Twitter ingest (handle_scrape): %d accounts, lookback=%dh (since=%s), "
+        "max_per_handle=%d, actor=%s",
+        len(handles), LOOKBACK_HOURS, since.isoformat(),
+        MAX_ITEMS_PER_HANDLE, settings.apify_twitter_actor,
     )
 
     items = run_actor_sync(
@@ -234,6 +258,12 @@ def run() -> None:
         token=token,
         actor_input=_build_input(handles, since),
     )
+
+    # Hours-precision filter: drop anything older than the cutoff.
+    items, old_dropped = _drop_old(items, cutoff)
+    if old_dropped:
+        log.info("Twitter ingest: dropped %d items older than %dh cutoff",
+                 old_dropped, LOOKBACK_HOURS)
 
     # Bucket by author (lowercased so case mismatches don't drop tweets).
     by_handle: dict[str, list[dict[str, Any]]] = {h.lower(): [] for h in handles}

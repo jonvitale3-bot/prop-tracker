@@ -421,3 +421,43 @@ def run(limit: int = DEFAULT_BATCH_LIMIT) -> None:
 
     log.info("parse: done. mentions=%d plays_extracted=%d failed=%d",
              len(rows), total_plays, failed)
+
+    # Per-account yield summary for this batch — useful for spotting
+    # accounts that produce mentions but no parseable picks.
+    _log_per_account_yield([row["id"] for row in rows])
+
+
+def _log_per_account_yield(mention_ids: list[int]) -> None:
+    """Group the just-parsed mentions by author and log mentions vs plays."""
+    if not mention_ids:
+        return
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.author, m.author_tier,
+                       count(*) AS mentions,
+                       count(DISTINCT pm.play_id) AS plays
+                FROM mentions m
+                LEFT JOIN play_mentions pm ON pm.mention_id = m.id
+                WHERE m.id = ANY(%s)
+                GROUP BY m.author, m.author_tier
+                ORDER BY mentions DESC
+                """,
+                (mention_ids,),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        log.exception("parse: failed to compute per-account yield")
+        return
+    if not rows:
+        return
+    log.info("parse: per-account yield this batch:")
+    for r in rows:
+        rate = (r["plays"] / r["mentions"] * 100) if r["mentions"] else 0
+        author = r["author"] or "<missing>"
+        tier = r["author_tier"] if r["author_tier"] is not None else "?"
+        log.info(
+            "  @%-22s [tier=%s]  mentions=%d  plays=%d  yield=%.1f%%",
+            author, tier, r["mentions"], r["plays"], rate,
+        )
