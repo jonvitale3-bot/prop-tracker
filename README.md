@@ -21,9 +21,11 @@ then grades the outcomes to see whether **fading the public** is profitable.
 
 ```
 prop-tracker/
-├── worker/        # Python: scrapers + parser + grader
-├── web/           # Next.js dashboard
-├── shared/sql/    # Database migrations (source of truth)
+├── app/, components/, lib/    # Next.js dashboard (root, deployed to Vercel)
+├── package.json, tsconfig.json, next.config.mjs, tailwind.config.ts
+├── worker/                    # Python: scrapers + parser + grader (Railway)
+├── shared/sql/                # Database migrations (source of truth)
+├── Dockerfile, railway.json   # Worker deploy config
 ├── .env.example
 └── README.md
 ```
@@ -41,5 +43,6 @@ prop-tracker/
 
 ## Quickstart
 
-See [worker/README.md](./worker/README.md) and [web/README.md](./web/README.md).
+See [worker/README.md](./worker/README.md) for the Python worker setup.
+For the dashboard: `npm install && npm run dev` from this directory.
 Start by copying `.env.example` to `.env` and filling in the secrets.

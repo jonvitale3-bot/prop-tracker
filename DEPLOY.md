@@ -5,8 +5,8 @@ The repo has two deploy targets and they each auto-deploy on every push to `main
 ## Vercel (dashboard)
 
 1. Go to https://vercel.com/new and import the `prop-tracker` repo.
-2. **Framework Preset:** Next.js (auto-detected).
-3. **Root Directory:** `web`  ← important, the repo is a monorepo.
+2. **Framework Preset:** Next.js (auto-detected — the Next.js app lives at the repo root).
+3. **Root Directory:** leave at the default (the repo root).
 4. **Environment Variables** — add:
    - `DATABASE_URL` = your **pooled** Neon connection string (the one with `-pooler` in the host).
 5. Click **Deploy**. Production URL appears in ~1 minute.
