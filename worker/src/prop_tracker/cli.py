@@ -44,4 +44,5 @@ def parse_mentions() -> None:
 
 def grade_results() -> None:
     _bootstrap()
-    raise SystemExit("grade-results: not yet implemented (milestone 5)")
+    from . import grade as _g  # noqa: PLC0415
+    _g.run()
