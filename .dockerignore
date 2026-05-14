@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+**/.venv
+**/node_modules
+**/.next
+**/__pycache__
+*.log
+.DS_Store
+.vscode
+.idea
+web

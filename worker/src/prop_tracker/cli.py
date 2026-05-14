@@ -46,3 +46,9 @@ def grade_results() -> None:
     _bootstrap()
     from . import grade as _g  # noqa: PLC0415
     _g.run()
+
+
+def worker_loop() -> None:
+    """Long-running orchestrator: ingest -> parse -> (daily) grade."""
+    from . import orchestrator  # noqa: PLC0415
+    orchestrator.main()

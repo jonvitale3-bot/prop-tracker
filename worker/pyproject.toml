@@ -23,6 +23,7 @@ ingest-twitter = "prop_tracker.cli:ingest_twitter"
 parse-mentions = "prop_tracker.cli:parse_mentions"
 grade-results  = "prop_tracker.cli:grade_results"
 migrate        = "prop_tracker.cli:migrate"
+worker-loop    = "prop_tracker.cli:worker_loop"
 
 [build-system]
 requires = ["hatchling"]
