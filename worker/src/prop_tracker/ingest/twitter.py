@@ -1,15 +1,18 @@
-"""Twitter ingester. Searches recent tweets via an Apify actor and writes them
-into the `mentions` table.
+"""Twitter ingester via Apify.
 
-Default actor: `apidojo/tweet-scraper` (env: APIFY_TWITTER_ACTOR).
-If you swap actors, tweak `_build_input` and `_normalize` to match the new
-actor's input/output schemas.
+Default actor: `kaitoeasyapi~twitter-x-data-tweet-scraper-pay-per-result-cheapest`
+which runs on the Apify free plan with pay-per-result pricing
+(~$0.30 / 1k tweets). Override with APIFY_TWITTER_ACTOR if you swap.
+
+If you swap actors, you may need to adjust `_build_input` and the field
+mapping in `_normalize` since each actor exposes slightly different shapes.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from ..apify import run_actor_sync
@@ -18,22 +21,23 @@ from .common import Mention, coerce_int, coerce_str, upsert_mentions
 
 log = logging.getLogger(__name__)
 
-import os as _os  # noqa: E402
-LOOKBACK_HOURS = 6
-MAX_ITEMS = int(_os.environ.get("INGEST_LIMIT_PER_SOURCE", "100"))
+MAX_ITEMS = int(os.environ.get("INGEST_LIMIT_PER_SOURCE", "200"))
 
 
 def _build_input(queries: tuple[str, ...]) -> dict[str, Any]:
-    since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).strftime(
-        "%Y-%m-%d_%H:%M:%S_UTC"
-    )
+    # kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest schema.
+    # Accepts a list of search terms; one tweet may match multiple terms but
+    # output is deduped on tweet id, so overlap is harmless.
     return {
         "searchTerms": list(queries),
-        "tweetLanguage": "en",
-        "sort": "Latest",
         "maxItems": MAX_ITEMS,
-        "start": since,           # apidojo/tweet-scraper expects this format
-        "includeSearchTerms": False,
+        "sort": "Latest",
+        "tweetLanguage": "en",
+        "onlyVerifiedUsers": False,
+        "onlyTwitterBlue": False,
+        "onlyImage": False,
+        "onlyVideo": False,
+        "onlyQuote": False,
     }
 
 
@@ -43,7 +47,6 @@ def _parse_dt(v: Any) -> datetime:
     if isinstance(v, (int, float)):
         return datetime.fromtimestamp(float(v), tz=timezone.utc)
     s = str(v)
-    # Twitter formats: "Mon May 13 19:00:00 +0000 2026" or ISO 8601.
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
@@ -54,47 +57,61 @@ def _parse_dt(v: Any) -> datetime:
 
 
 def _normalize(item: dict[str, Any]) -> Mention | None:
-    source_id = coerce_str(item.get("id") or item.get("id_str") or item.get("tweetId"))
+    """Best-effort field mapping across common Twitter actor schemas."""
+    source_id = coerce_str(
+        item.get("id") or item.get("id_str") or item.get("tweetId")
+        or item.get("conversation_id")
+    )
     if not source_id:
         return None
 
     text = coerce_str(
-        item.get("text") or item.get("fullText") or item.get("full_text")
+        item.get("text") or item.get("full_text") or item.get("fullText")
     )
+    if not text:
+        # Some actors nest text under legacy.full_text or similar
+        legacy = item.get("legacy")
+        if isinstance(legacy, dict):
+            text = coerce_str(legacy.get("full_text"))
     if not text:
         return None
 
-    # Author can be a dict ({userName, screenName, ...}) or a flat string.
     author_obj = item.get("author") or item.get("user")
     if isinstance(author_obj, dict):
         author = coerce_str(
-            author_obj.get("userName")
-            or author_obj.get("screen_name")
-            or author_obj.get("username")
+            author_obj.get("userName") or author_obj.get("username")
+            or author_obj.get("screen_name") or author_obj.get("name")
         )
     else:
-        author = coerce_str(author_obj)
+        author = coerce_str(author_obj) or coerce_str(item.get("username"))
+
+    url = coerce_str(item.get("url") or item.get("twitterUrl") or item.get("tweetUrl"))
+    if not url and author and source_id:
+        url = f"https://x.com/{author}/status/{source_id}"
+
+    likes = coerce_int(item.get("likeCount") or item.get("favorite_count")
+                       or item.get("favoriteCount"))
+    rts = coerce_int(item.get("retweetCount") or item.get("retweet_count"))
+    replies = coerce_int(item.get("replyCount") or item.get("reply_count"))
 
     return Mention(
         source="twitter",
         source_id=source_id,
         author=author,
-        url=coerce_str(item.get("url") or item.get("twitterUrl")),
-        posted_at=_parse_dt(item.get("createdAt") or item.get("created_at")),
+        url=url,
+        posted_at=_parse_dt(item.get("createdAt") or item.get("created_at")
+                            or item.get("date")),
         raw_text=text,
-        engagement_score=(
-            coerce_int(item.get("likeCount") or item.get("favorite_count"))
-            + coerce_int(item.get("retweetCount") or item.get("retweet_count"))
-            + coerce_int(item.get("replyCount") or item.get("reply_count"))
-        ),
+        engagement_score=likes + rts + replies,
     )
 
 
 def run() -> None:
     settings = load_settings()
     token = require_apify(settings)
-    log.info("Twitter ingest: queries=%s actor=%s",
-             " | ".join(settings.twitter_queries), settings.apify_twitter_actor)
+    log.info("Twitter ingest: queries=%s actor=%s max=%d",
+             " | ".join(settings.twitter_queries),
+             settings.apify_twitter_actor, MAX_ITEMS)
 
     items = run_actor_sync(
         actor_id=settings.apify_twitter_actor,
@@ -103,5 +120,6 @@ def run() -> None:
     )
 
     mentions = [m for m in (_normalize(it) for it in items) if m is not None]
-    log.info("Twitter ingest: %d items -> %d normalized mentions", len(items), len(mentions))
+    log.info("Twitter ingest: %d items -> %d normalized mentions",
+             len(items), len(mentions))
     upsert_mentions(mentions)

@@ -49,14 +49,25 @@ def main() -> None:
         cycle_start = time.monotonic()
         log.info("orchestrator: --- cycle start ---")
 
-        # Use Reddit's public JSON API directly (no Apify dependency).
-        # Set INGEST_REDDIT_BACKEND=apify to fall back to the trudax actor.
+        # Pick which sources to ingest each cycle. Twitter is the primary
+        # signal source for sports betting picks; Reddit is optional and
+        # secondary (currently 403'd from cloud IPs without OAuth).
         from . import parse  # noqa: PLC0415
-        if os.environ.get("INGEST_REDDIT_BACKEND", "direct").lower() == "apify":
-            from .ingest import reddit as ingest_reddit  # noqa: PLC0415
-        else:
-            from .ingest import reddit_direct as ingest_reddit  # noqa: PLC0415
-        _safe("ingest-reddit", ingest_reddit.run)
+        sources = [s.strip().lower()
+                   for s in os.environ.get("INGEST_SOURCES", "twitter").split(",")
+                   if s.strip()]
+
+        if "twitter" in sources:
+            from .ingest import twitter as ingest_twitter  # noqa: PLC0415
+            _safe("ingest-twitter", ingest_twitter.run)
+
+        if "reddit" in sources:
+            if os.environ.get("INGEST_REDDIT_BACKEND", "direct").lower() == "apify":
+                from .ingest import reddit as ingest_reddit  # noqa: PLC0415
+            else:
+                from .ingest import reddit_direct as ingest_reddit  # noqa: PLC0415
+            _safe("ingest-reddit", ingest_reddit.run)
+
         _safe("parse-mentions", parse.run)
 
         # Grade once per day, on the first cycle at/after the configured hour.
