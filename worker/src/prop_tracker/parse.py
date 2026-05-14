@@ -24,6 +24,7 @@ from anthropic import APIError
 
 from .config import load_settings, require_anthropic
 from .db import connect
+from .prefilter import should_skip as prefilter_should_skip
 
 log = logging.getLogger(__name__)
 
@@ -357,10 +358,32 @@ def _link_mention(cur, play_id: int, mention_id: int, p: dict[str, Any]) -> None
     )
 
 
-def _mark_parsed(cur, mention_id: int, error: str | None) -> None:
+def _mark_parsed(
+    cur,
+    mention_id: int,
+    *,
+    error: str | None = None,
+    is_pick: bool | None = None,
+    skip_reason: str | None = None,
+) -> None:
+    """Stamp the mention as processed.
+
+    Outcomes recorded:
+      * is_pick=True,  skip_reason=None         → Haiku extracted at least one play
+      * is_pick=False, skip_reason='no_pick'    → Haiku returned []
+      * is_pick=False, skip_reason='wrong_sport'→ prefilter dropped before Haiku
+      * is_pick=NULL,  skip_reason='parse_error', error=...  → exception path
+    """
     cur.execute(
-        "UPDATE mentions SET parsed_at = now(), parse_error = %s WHERE id = %s",
-        (error, mention_id),
+        """
+        UPDATE mentions
+        SET parsed_at  = now(),
+            parse_error = %s,
+            is_pick     = %s,
+            skip_reason = %s
+        WHERE id = %s
+        """,
+        (error, is_pick, skip_reason, mention_id),
     )
 
 
@@ -386,11 +409,29 @@ def run(limit: int = DEFAULT_BATCH_LIMIT) -> None:
     log.info("parse: %d unparsed mention(s) to process (model=%s)", len(rows), model)
     total_plays = 0
     failed = 0
+    prefiltered = 0
 
     for row in rows:
         mid = row["id"]
         text = row["raw_text"]
         posted_at = row["posted_at"]
+
+        # 1) Prefilter — drop obvious non-NBA/MLB before spending a Haiku
+        #    call on it. The mention row is still updated so the audit
+        #    trail (is_pick=false, skip_reason=...) is preserved.
+        skip, reason = prefilter_should_skip(text)
+        if skip:
+            prefiltered += 1
+            try:
+                with connect() as conn, conn.cursor() as cur:
+                    _mark_parsed(cur, mid, is_pick=False, skip_reason=reason)
+                    conn.commit()
+                log.info("parse: mention %d prefiltered (%s)", mid, reason)
+            except Exception:
+                log.exception("parse: failed to mark prefiltered mention %d", mid)
+            continue
+
+        # 2) Send to Haiku.
         try:
             result = _call_claude(client, model, text, posted_at)
             plays_in = result.get("plays") or []
@@ -404,7 +445,10 @@ def run(limit: int = DEFAULT_BATCH_LIMIT) -> None:
                     _link_mention(cur, play_id, mid, p)
                     _recompute_public_pct(cur, p)
                     kept += 1
-                _mark_parsed(cur, mid, error=None)
+                if kept > 0:
+                    _mark_parsed(cur, mid, is_pick=True)
+                else:
+                    _mark_parsed(cur, mid, is_pick=False, skip_reason="no_pick")
                 conn.commit()
             total_plays += kept
             log.info("parse: mention %d -> %d play(s) kept (raw: %d)", mid, kept, len(plays_in))
@@ -414,13 +458,15 @@ def run(limit: int = DEFAULT_BATCH_LIMIT) -> None:
             log.warning("parse: mention %d failed: %s", mid, err)
             try:
                 with connect() as conn, conn.cursor() as cur:
-                    _mark_parsed(cur, mid, error=err)
+                    _mark_parsed(cur, mid, error=err, skip_reason="parse_error")
                     conn.commit()
             except Exception:
                 log.exception("parse: also failed to record parse_error for mention %d", mid)
 
-    log.info("parse: done. mentions=%d plays_extracted=%d failed=%d",
-             len(rows), total_plays, failed)
+    log.info(
+        "parse: done. mentions=%d prefiltered=%d plays_extracted=%d failed=%d",
+        len(rows), prefiltered, total_plays, failed,
+    )
 
     # Per-account yield summary for this batch — useful for spotting
     # accounts that produce mentions but no parseable picks.

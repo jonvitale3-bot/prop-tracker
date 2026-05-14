@@ -1,6 +1,56 @@
 # Phase 2 Plan: Odds API integration + reverse line movement signal
 
-Status: **plan only, no code**. Awaiting review before implementation.
+Status: **plan only, no code**. Implementation is **gated on the
+game_date accuracy fix** — see "Prerequisites" below.
+
+## Prerequisites (must complete BEFORE any Phase 2 code lands)
+
+The Phase 2 polling schedule (T-2h, T-30m, T-10m, T+0) is computed
+relative to game tipoff, which we look up by `event_id` on the play.
+If `game_date` is wrong, every downstream poll fires against the wrong
+game — strictly worse than no polling. So:
+
+1. **game_date audit must show ≥90% accuracy on a 20-play sample.**
+   Today's audit (2026-05-14) showed ~40% accuracy: roughly 60% of
+   recent plays have `game_date = posted_ET_date + 1` due to the
+   parser using `date.today()` in server UTC instead of an ET-anchored
+   "post day". This bug must be fixed first.
+2. **Parser day-reference rules** (the prompt update specified in the
+   audit response) must be applied: anchor day = posted ET date,
+   explicit "tomorrow" / weekday / specific-date overrides, "this
+   weekend" / multi-day → reject.
+3. **`game_date_unverified` flag** must be implemented (description
+   below) and Phase 2 polling must skip any play where it is `TRUE`.
+
+Until all three are done, Phase 2 stays on paper.
+
+### `game_date_unverified` column
+
+```sql
+ALTER TABLE plays
+    ADD COLUMN game_date_unverified BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+Set to `TRUE` when the parser-assigned `game_date` cannot be matched
+against an Odds API event for `(sport, game_date, subject_team)`:
+
+* For team plays: no event exists where `subject` is one of the two
+  competitors.
+* For player plays: no event exists whose competitors' rosters contain
+  `subject`. (Roster lookup is best-effort; if we can't get a roster,
+  we leave `game_date_unverified = FALSE` rather than penalize
+  ambiguity — the team plays carry the strict check.)
+
+When `TRUE`:
+
+* **`poll_play` MUST return early without firing any odds calls.**
+* **`poll_due` MUST exclude these plays from its work queue.**
+* Dashboard hides them by default (filter `game_date_unverified = FALSE`).
+
+The flag is settable but not auto-cleared — if the parser later
+re-emits the same play with a corrected `game_date`, that's a NEW row
+in `plays` (different unique key). The bad row stays flagged for the
+audit trail.
 
 ## Goal
 
@@ -64,10 +114,23 @@ late polls + 1 close = **~10 polls per play**.
   all 10 NBA player-prop markets per call, request *just* the specific
   market needed (e.g. only `player_points` for a points prop). The API
   bills per market — so a single-market call costs ~1 credit instead of 10.
-- **Cap polls per play at 5** (T=parse, T-2h, T-30m, T-10m, T+0). Loses some
-  resolution but is good enough for RLM signal.
+- **Per-poll consensus cost = 3 credits.** Consensus is the median of three
+  public books: DraftKings + FanDuel + BetMGM. One market × three books =
+  3 credits per poll.
+- **Differentiated poll schedules by `market_category`** (decision from
+  Phase 2 sign-off):
 
-Revised math: **30 plays/day × 5 polls × ~1.5 credits avg = ~225 credits/day = ~6,750/month**, well under budget. Pinnacle costs add ~30 plays × 1 = 30 credits/day for the opener pulls. **Total budget: ~7,000 credits/month, ~35% of cap.** Plenty of headroom for spikes.
+  | market_category | Polls per play | Schedule (relative to tipoff) |
+  |--|--|--|
+  | `nba_standard`    | 5 | T=parse, T-2h, T-30m, T-10m, T+0 |
+  | `mlb_pitcher`     | 5 | T=parse, T-2h, T-30m, T-10m, T+0 |
+  | `mlb_batter`      | 3 | T-3h, T-30m, T+0 (skip earlier — lines often not posted) |
+
+Revised math:
+- NBA / pitcher plays: 5 polls × 3 books = **15 credits/play** + 1 Pinnacle opener = **16**
+- MLB batter plays: 3 polls × 3 books = **9 credits/play** + 1 Pinnacle opener = **10**
+
+Mixed daily mix estimate (15 NBA+pitcher, 15 MLB batter): 15×16 + 15×10 = **390 credits/day ≈ 11,700/month**, ~58% of cap. Heavier days (40 plays) still fit comfortably under 20k.
 
 ## Architecture
 
@@ -101,18 +164,45 @@ captures within the same second don't double-insert.
 
 ```sql
 ALTER TABLE plays
-    ADD COLUMN event_id      TEXT,            -- the-odds-api event id, set at first odds fetch
-    ADD COLUMN line_at_post  NUMERIC(7,2),    -- consensus line at first poll
-    ADD COLUMN line_current  NUMERIC(7,2),    -- consensus line at most recent poll
-    ADD COLUMN line_delta    NUMERIC(7,2);    -- line_current - line_at_post
+    ADD COLUMN event_id        TEXT,            -- the-odds-api event id, set at first odds fetch
+    ADD COLUMN market_category TEXT,            -- 'nba_standard' | 'mlb_pitcher' | 'mlb_batter'
+    ADD COLUMN line_at_post    NUMERIC(7,2),    -- consensus line at first poll (NULL for moneylines)
+    ADD COLUMN line_current    NUMERIC(7,2),    -- consensus line at most recent poll
+    ADD COLUMN line_delta      NUMERIC(7,2),    -- line_current - line_at_post
+    ADD COLUMN odds_at_post    INTEGER,         -- consensus American odds at first poll
+    ADD COLUMN odds_current    INTEGER,         -- consensus American odds at most recent poll
+    ADD COLUMN odds_delta_cents INTEGER;        -- odds_current - odds_at_post, in American odds "cents"
+                                                -- e.g. +150 → +170 = +20 cents (line moved against backer)
+                                                -- Primary RLM signal for moneylines.
 ```
 
 `line_at_post` is set once when the play is first polled. `line_current`
 and `line_delta` get updated on every subsequent poll.
 
+**Moneyline handling** (decision from Phase 2 sign-off): for `market='moneyline'`
+plays, `line_*` columns are NULL and the RLM signal flows through
+`odds_at_post` / `odds_current` / `odds_delta_cents`. The delta is the
+straight American-odds difference. A `+plus` backer "wins" the move when
+odds get longer (more positive), so a positive `odds_delta_cents` on a
+`+plus` side = line moved *toward* the bet (not RLM). RLM for moneylines
+is the opposite: odds shortened against the side the brands took.
+
 "Consensus line" = median across the 3 main public books (DK, FD, BetMGM).
 Pinnacle is captured separately into `prop_lines` for sharp reference but
 doesn't drive `line_at_post` / `line_current` — those track public.
+
+### `market_category` assignment
+
+Set at parse time, derived from `(sport, market, subject)`:
+
+| Conditions | market_category |
+|--|--|
+| sport = 'nba' | `nba_standard` |
+| sport = 'mlb' AND market IN ('strikeouts_pitcher', 'outs_recorded', 'earned_runs', 'innings_pitched') | `mlb_pitcher` |
+| sport = 'mlb' AND market IN ('hits', 'total_bases', 'home_runs', 'runs', 'rbis', 'walks', 'stolen_bases', 'strikeouts_batter', 'hits_runs_rbis') | `mlb_batter` |
+| sport = 'mlb' AND market IN ('spread', 'total', 'moneyline', 'run_line') | `mlb_pitcher` (team-level; polls fire on tighter pitcher schedule since pitcher news drives the line) |
+
+This drives both the polling schedule (above) and the dashboard's grouping.
 
 ### New scheduler: `worker/ingest/odds.py`
 
@@ -139,9 +229,12 @@ When a play has `polls_done >= 5` OR the game has tipped off, the row is
 deleted (we have all the snapshots we need; subsequent picks for the same
 event reuse the same `prop_lines` history).
 
-### Reverse-line-movement view
+### Reverse-line-movement view (Pattern A/B/C as a DB VIEW)
 
-A derived view computes the fade-pattern classification:
+Per Phase 2 sign-off: classification lives **in the database as a VIEW**,
+not in worker Python. This keeps the rule transparent (a single SQL file
+to read), makes it cheap to change thresholds without redeploying the
+worker, and lets the dashboard query it directly.
 
 ```sql
 CREATE VIEW play_fade_signal AS
@@ -151,23 +244,36 @@ SELECT
   p.line_at_post,
   p.line_current,
   p.line_delta,
+  p.odds_at_post,
+  p.odds_current,
+  p.odds_delta_cents,
   COUNT(DISTINCT pm.mention_id) AS brand_mention_count,
-  -- Reverse line movement = line moved AGAINST the bet's side
-  -- (over bet → line went down, under bet → line went up, etc.)
+  -- Reverse line movement = market moved AGAINST the bet's side.
+  -- Spread/total: line_delta sign rules.
+  -- Moneyline: odds shortened against the side (delta_cents negative for +plus, positive for -minus).
   CASE
-    WHEN p.side = 'over'  AND p.line_delta <  0 THEN true
-    WHEN p.side = 'under' AND p.line_delta >  0 THEN true
-    WHEN p.side = 'minus' AND p.line_delta > 0 THEN true  -- favorite line shrunk = sharp moved off favorite
-    WHEN p.side = 'plus'  AND p.line_delta < 0 THEN true
+    WHEN p.market = 'moneyline' AND p.side = 'plus'  AND p.odds_delta_cents < 0 THEN true
+    WHEN p.market = 'moneyline' AND p.side = 'minus' AND p.odds_delta_cents > 0 THEN true
+    WHEN p.market != 'moneyline' AND p.side = 'over'  AND p.line_delta < 0 THEN true
+    WHEN p.market != 'moneyline' AND p.side = 'under' AND p.line_delta > 0 THEN true
+    WHEN p.market != 'moneyline' AND p.side = 'minus' AND p.line_delta > 0 THEN true
+    WHEN p.market != 'moneyline' AND p.side = 'plus'  AND p.line_delta < 0 THEN true
     ELSE false
   END AS reverse_line_movement,
-  -- Pattern classification
+  -- Pattern classification (thresholds editable in this VIEW only)
   CASE
-    WHEN COUNT(DISTINCT pm.mention_id) >= 3 AND p.line_delta IS NOT NULL
-         AND ((p.side='over'  AND p.line_delta <  0) OR
-              (p.side='under' AND p.line_delta >  0) OR
-              (p.side='minus' AND p.line_delta > 0) OR
-              (p.side='plus'  AND p.line_delta < 0))
+    WHEN COUNT(DISTINCT pm.mention_id) >= 3 AND (
+           (p.market = 'moneyline' AND (
+              (p.side = 'plus'  AND p.odds_delta_cents < 0) OR
+              (p.side = 'minus' AND p.odds_delta_cents > 0)
+           )) OR
+           (p.market != 'moneyline' AND p.line_delta IS NOT NULL AND (
+              (p.side = 'over'  AND p.line_delta < 0) OR
+              (p.side = 'under' AND p.line_delta > 0) OR
+              (p.side = 'minus' AND p.line_delta > 0) OR
+              (p.side = 'plus'  AND p.line_delta < 0)
+           ))
+         )
       THEN 'A'   -- strong fade: brand consensus + RLM
     WHEN COUNT(DISTINCT pm.mention_id) >= 2
       THEN 'B'   -- brand consensus without confirmed RLM (yet)
@@ -215,14 +321,49 @@ and what we're testing the fade thesis against.
 5. **`play_fade_signal` view** + dashboard sections.
 6. **Backfill** — once running, optionally re-fetch `line_at_post` for any existing plays from the last 24h.
 
-## Open questions before implementation
+## Resolved decisions (from Phase 2 sign-off)
 
-- **Which public books for consensus?** Default proposal: median of DK / FD / BetMGM. If only one is present for a market, use that. Alternative: just DK (simpler, single source of truth).
-- **What does "consensus line" mean for moneylines?** No line value — only price (odds). For ML plays, `line_at_post` is NULL but `odds_at_post` (already on `play_mentions`) is the comparison anchor; `line_delta` becomes odds delta in cents.
-- **MLB batter props gating** — recon showed these often aren't posted until close to first pitch. Should we skip Odds API polls for MLB batter plays parsed > 4h before tipoff, and let the first poll happen at T-3h?
-- **Auto-disable handles below 5% yield** — automation hook, or always manual via the per-account log? My take: manual for now (you mentioned this in the Phase 1 polish note), automate later if it's annoying.
+| Question | Resolution |
+|--|--|
+| Public-books consensus | Median of **DK + FD + BetMGM**. If only 1-2 present for a market, use what's available (median of 1 or 2). 3 credits per poll. |
+| Moneyline RLM signal | `odds_delta_cents` (American odds delta). New columns `odds_at_post` / `odds_current` / `odds_delta_cents` on `plays`. Signs flip by side (see VIEW above). |
+| MLB batter prop gating | New `market_category` column. `mlb_batter` plays poll on a 3-poll schedule (T-3h, T-30m, T+0) instead of the full 5. Avoids wasted polls on lines that don't exist yet. |
+| Yield-based auto-disable | **Manual.** No automation hook. Build a weekly yield report cron (`worker/scripts/weekly_yield.py`) that emails / logs per-handle stats; user toggles `active: false` in YAML when warranted. |
+| Pattern A/B/C classifier | **Database VIEW** (`play_fade_signal`), not worker Python. Thresholds editable in one SQL file. |
+
+## Weekly yield report cron (new)
+
+Standalone script run once a week (Sunday 9pm UTC via Railway cron):
+
+```
+worker/scripts/weekly_yield.py
+```
+
+Computes for each `active: true` handle, over the last 7 days:
+- Mentions ingested
+- Plays parsed (and yield %)
+- Graded plays + W/L/Push
+- ROI (assuming -110 odds where not specified)
+- Pattern A play count + Pattern A win rate
+
+Output: pretty-printed table to stdout (captured by Railway logs) +
+optional Slack webhook later. No DB writes, no actions taken. The
+report is purely advisory; the user reads it and decides what to
+deactivate.
+
+## Implementation phases (within Phase 2)
+
+0. **Gate check** — confirm prerequisites (≥90% game_date accuracy + parser day-reference rules shipped + `game_date_unverified` plumbed). Do not proceed past this step until verified.
+1. **Migration 005** — add `prop_lines`, `prop_polls`, the new columns on `plays` (`event_id`, `market_category`, `line_at_post`, `line_current`, `line_delta`, `odds_at_post`, `odds_current`, `odds_delta_cents`, `game_date_unverified`), and the `play_fade_signal` VIEW. Note: migration 004 (prefilter audit trail: `mentions.is_pick`, `mentions.skip_reason`) lands with the Phase 1 prefilter work, so Phase 2's first DB migration is 005.
+2. **`worker/ingest/odds.py`** — Odds API client + `poll_play` + `poll_due`. Reads `market_category` to decide poll cadence. **Both functions MUST short-circuit when `plays.game_date_unverified = TRUE`** — no API calls for unverified dates.
+3. **Parser update** — set `market_category` on `plays` at parse time based on the table above.
+4. **Wire into orchestrator** — after `parse-mentions`, call `poll_play` for any newly-created plays, then `poll_due` for the rest.
+5. **Event-id resolution** — when a new play is created, resolve `event_id` against the day's Odds API events (NBA: ~2-12 events/day, MLB: 10-15). If no match → set `game_date_unverified = TRUE` and skip subsequent polling.
+6. **Dashboard sections** — Pattern A "Fade candidates" + Pattern B "Watch list", driven entirely by `play_fade_signal`.
+7. **`worker/scripts/weekly_yield.py`** — standalone yield report.
+8. **Backfill** — optionally re-fetch `line_at_post` for any existing plays from the last 24h.
 
 ---
 
-When you've reviewed, we can refine the credit budget (especially the
-single-market trick) and the schedule. Ready when you are.
+**Awaiting approval.** No Phase 2 code will be written until you sign off
+on this revised plan.
