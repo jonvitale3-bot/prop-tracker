@@ -9,8 +9,8 @@ export const revalidate = 60;
 
 export default async function Home() {
   const [plays, hot, allTime, last7] = await Promise.all([
-    getTonightsPlays(2),  // 2+ mentions only (lone-wolf picks hidden)
-    getHotSubjects(3),    // grouped by subject+market+side, 3+ mentions
+    getTonightsPlays(1),  // show all player props; mention_count column shows consensus
+    getHotSubjects(1),    // grouped by subject+market+side, all (sort by mention count)
     getStats(null),
     getStats(7),
   ]);
@@ -43,7 +43,8 @@ export default async function Home() {
           Hot players ({hot.length})
         </h2>
         <p className="mb-3 text-xs text-neutral-500">
-          Player props grouped by player + market + side, ignoring line variation. 3+ mentions required.
+          Player props grouped by player + market + side (ignoring line). Sorted by total mentions.
+          A mention count of 1 is one poster&apos;s lean; 3+ starts to look like consensus.
         </p>
         <HotSubjects rows={hot} />
       </section>
@@ -53,7 +54,7 @@ export default async function Home() {
           Tonight&apos;s exact player props ({plays.length})
         </h2>
         <p className="mb-3 text-xs text-neutral-500">
-          Strict line match. Player props only. 2+ mentions required to filter lone picks.
+          Strict line match. Player props only. Lower mention count = sparser data; the column tells the truth.
         </p>
         <PlaysTable rows={plays} />
       </section>
