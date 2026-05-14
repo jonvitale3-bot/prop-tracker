@@ -8,14 +8,14 @@ from typing import Iterator
 import psycopg
 from psycopg.rows import dict_row
 
-from .config import load_settings
+from .config import load_settings, require_database, require_database_direct
 
 
 @contextmanager
 def connect(direct: bool = False) -> Iterator[psycopg.Connection]:
     """Open a connection. Use direct=True for migrations / long-running jobs."""
     settings = load_settings()
-    dsn = settings.database_url_direct if direct else settings.database_url
+    dsn = require_database_direct(settings) if direct else require_database(settings)
     with psycopg.connect(dsn, autocommit=False, row_factory=dict_row) as conn:
         yield conn
 

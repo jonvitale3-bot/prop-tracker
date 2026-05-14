@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..apify import run_actor_sync
-from ..config import load_settings
+from ..config import load_settings, require_apify
 from .common import Mention, coerce_int, coerce_str, upsert_mentions
 
 log = logging.getLogger(__name__)
@@ -91,12 +91,13 @@ def _normalize(item: dict[str, Any]) -> Mention | None:
 
 def run() -> None:
     settings = load_settings()
+    token = require_apify(settings)
     log.info("Twitter ingest: queries=%s actor=%s",
              " | ".join(settings.twitter_queries), settings.apify_twitter_actor)
 
     items = run_actor_sync(
         actor_id=settings.apify_twitter_actor,
-        token=settings.apify_token,
+        token=token,
         actor_input=_build_input(settings.twitter_queries),
     )
 

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..apify import run_actor_sync
-from ..config import load_settings
+from ..config import load_settings, require_apify
 from .common import Mention, coerce_int, coerce_str, upsert_mentions
 
 log = logging.getLogger(__name__)
@@ -93,12 +93,13 @@ def _normalize(item: dict[str, Any]) -> Mention | None:
 
 def run() -> None:
     settings = load_settings()
+    token = require_apify(settings)
     log.info("Reddit ingest: subreddits=%s actor=%s",
              ",".join(settings.reddit_subreddits), settings.apify_reddit_actor)
 
     items = run_actor_sync(
         actor_id=settings.apify_reddit_actor,
-        token=settings.apify_token,
+        token=token,
         actor_input=_build_input(settings.reddit_subreddits),
     )
 
