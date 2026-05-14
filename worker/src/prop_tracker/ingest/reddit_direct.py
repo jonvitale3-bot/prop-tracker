@@ -1,10 +1,16 @@
-"""Reddit ingester that hits Reddit's public JSON API directly.
+"""Reddit ingester that hits Reddit's API directly.
 
-No Apify dependency, no actor compute, no memory quotas. Reddit allows
-unauthenticated access to per-subreddit JSON listings at
-`https://www.reddit.com/r/<sub>/new.json?limit=100` with a reasonable
-User-Agent header. Rate limit is ~60 req/min from a single IP, way more
-than we need (one request per subreddit per cycle).
+Two modes:
+
+  1. OAuth (preferred). Requires REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET,
+     REDDIT_USERNAME, REDDIT_PASSWORD env vars. Register a "script" type
+     app at https://www.reddit.com/prefs/apps to get client_id/secret.
+     Reddit gives OAuth clients ~100 requests/min and routes through
+     oauth.reddit.com which doesn't pre-block cloud IPs.
+
+  2. Anonymous. Uses public www.reddit.com/.../new.json. Works locally
+     but is reliably 403'd from cloud IPs (Railway, AWS, etc.) by
+     Reddit's WAF. Falls back to anonymous only if no client_id is set.
 """
 
 from __future__ import annotations
@@ -33,17 +39,37 @@ _UA = os.environ.get(
 )
 
 
+def _oauth_token() -> str | None:
+    """Fetch a Reddit OAuth bearer token via password grant. Returns None
+    if OAuth env vars aren't configured (caller falls back to anonymous)."""
+    cid = os.environ.get("REDDIT_CLIENT_ID")
+    sec = os.environ.get("REDDIT_CLIENT_SECRET")
+    user = os.environ.get("REDDIT_USERNAME")
+    pw = os.environ.get("REDDIT_PASSWORD")
+    if not all([cid, sec, user, pw]):
+        return None
+    r = httpx.post(
+        "https://www.reddit.com/api/v1/access_token",
+        auth=(cid, sec),
+        data={"grant_type": "password", "username": user, "password": pw},
+        headers={"User-Agent": _UA},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
 )
-def _fetch_subreddit(client: httpx.Client, sub: str, limit: int) -> list[dict[str, Any]]:
-    url = f"https://www.reddit.com/r/{sub}/new.json"
+def _fetch_subreddit(client: httpx.Client, sub: str, limit: int, *, oauth: bool) -> list[dict[str, Any]]:
+    host = "oauth.reddit.com" if oauth else "www.reddit.com"
+    url = f"https://{host}/r/{sub}/new.json"
     r = client.get(url, params={"limit": str(min(limit, 100))})
     if r.status_code == 429:
-        # Surface rate-limit explicitly so tenacity can back off.
         raise httpx.HTTPStatusError("429 rate limited", request=r.request, response=r)
     r.raise_for_status()
     data = r.json()
@@ -85,17 +111,22 @@ def _normalize(item: dict[str, Any]) -> Mention | None:
 def run() -> None:
     settings = load_settings()
     subs = [s for s in settings.reddit_subreddits if s]
-    log.info("Reddit (direct) ingest: subs=%s limit/sub=%d", ",".join(subs), PER_SUBREDDIT_LIMIT)
+
+    token = _oauth_token()
+    headers = {"User-Agent": _UA, "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        mode = "oauth"
+    else:
+        mode = "anonymous"
+    log.info("Reddit (direct, %s) ingest: subs=%s limit/sub=%d",
+             mode, ",".join(subs), PER_SUBREDDIT_LIMIT)
 
     all_items: list[dict[str, Any]] = []
-    with httpx.Client(
-        headers={"User-Agent": _UA, "Accept": "application/json"},
-        timeout=15.0,
-        follow_redirects=True,
-    ) as client:
+    with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
         for sub in subs:
             try:
-                items = _fetch_subreddit(client, sub, PER_SUBREDDIT_LIMIT)
+                items = _fetch_subreddit(client, sub, PER_SUBREDDIT_LIMIT, oauth=bool(token))
                 log.info("Reddit (direct): r/%s -> %d posts", sub, len(items))
                 all_items.extend(items)
             except Exception:
