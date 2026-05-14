@@ -20,8 +20,10 @@ from .common import Mention, coerce_int, coerce_str, upsert_mentions
 log = logging.getLogger(__name__)
 
 # How many results per subreddit. The actor's `maxItems` is global, so we ask
-# for N * subreddit_count.
-PER_SUBREDDIT_LIMIT = 100
+# for N * subreddit_count. Overridable via INGEST_LIMIT_PER_SOURCE (handy
+# for cheap test runs).
+import os as _os  # noqa: E402  (local import keeps the public surface small)
+PER_SUBREDDIT_LIMIT = int(_os.environ.get("INGEST_LIMIT_PER_SOURCE", "100"))
 
 
 def _build_input(subreddits: tuple[str, ...]) -> dict[str, Any]:

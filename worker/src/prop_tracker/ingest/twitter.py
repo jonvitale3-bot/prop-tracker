@@ -18,8 +18,9 @@ from .common import Mention, coerce_int, coerce_str, upsert_mentions
 
 log = logging.getLogger(__name__)
 
+import os as _os  # noqa: E402
 LOOKBACK_HOURS = 6
-MAX_ITEMS = 100
+MAX_ITEMS = int(_os.environ.get("INGEST_LIMIT_PER_SOURCE", "100"))
 
 
 def _build_input(queries: tuple[str, ...]) -> dict[str, Any]:
