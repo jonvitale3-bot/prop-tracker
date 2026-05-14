@@ -26,12 +26,14 @@ def migrate() -> None:
 
 def ingest_reddit() -> None:
     _bootstrap()
-    raise SystemExit("ingest-reddit: not yet implemented (milestone 3)")
+    from .ingest import reddit as _r  # noqa: PLC0415
+    _r.run()
 
 
 def ingest_twitter() -> None:
     _bootstrap()
-    raise SystemExit("ingest-twitter: not yet implemented (milestone 3)")
+    from .ingest import twitter as _t  # noqa: PLC0415
+    _t.run()
 
 
 def parse_mentions() -> None:
