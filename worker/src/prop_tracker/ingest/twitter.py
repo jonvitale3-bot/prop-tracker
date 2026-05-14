@@ -18,6 +18,7 @@ from typing import Any
 from ..apify import run_actor_sync
 from ..config import load_settings, require_apify
 from .common import Mention, coerce_int, coerce_str, upsert_mentions
+from . import twitter_queries
 
 log = logging.getLogger(__name__)
 
@@ -109,14 +110,21 @@ def _normalize(item: dict[str, Any]) -> Mention | None:
 def run() -> None:
     settings = load_settings()
     token = require_apify(settings)
-    log.info("Twitter ingest: queries=%s actor=%s max=%d",
-             " | ".join(settings.twitter_queries),
-             settings.apify_twitter_actor, MAX_ITEMS)
+
+    # Auto-build queries from tonight's NBA slate + static keywords + env extras.
+    # Set TWITTER_AUTO_QUERIES=0 to fall back to the literal TWITTER_QUERIES list.
+    if os.environ.get("TWITTER_AUTO_QUERIES", "1") == "1":
+        queries = tuple(twitter_queries.build_queries())
+    else:
+        queries = settings.twitter_queries
+
+    log.info("Twitter ingest: %d queries actor=%s max=%d",
+             len(queries), settings.apify_twitter_actor, MAX_ITEMS)
 
     items = run_actor_sync(
         actor_id=settings.apify_twitter_actor,
         token=token,
-        actor_input=_build_input(settings.twitter_queries),
+        actor_input=_build_input(queries),
     )
 
     mentions = [m for m in (_normalize(it) for it in items) if m is not None]
