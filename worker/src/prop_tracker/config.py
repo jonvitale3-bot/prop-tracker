@@ -33,6 +33,7 @@ class Settings:
     apify_token: str
     apify_reddit_actor: str
     apify_twitter_actor: str
+    odds_api_key: str | None
     reddit_subreddits: tuple[str, ...]
     twitter_queries: tuple[str, ...]
     log_level: str
@@ -47,6 +48,7 @@ def load_settings() -> Settings:
         apify_token=_require("APIFY_TOKEN"),
         apify_reddit_actor=os.environ.get("APIFY_REDDIT_ACTOR", "trudax~reddit-scraper-lite"),
         apify_twitter_actor=os.environ.get("APIFY_TWITTER_ACTOR", "apidojo~tweet-scraper"),
+        odds_api_key=os.environ.get("ODDS_API_KEY") or None,
         reddit_subreddits=tuple(
             s.strip() for s in os.environ.get("REDDIT_SUBREDDITS", "sportsbook").split(",") if s.strip()
         ),

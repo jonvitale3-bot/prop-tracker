@@ -11,7 +11,15 @@ def _bootstrap() -> None:
 
 
 def migrate() -> None:
-    _bootstrap()
+    # Migrations only need DATABASE_URL[_DIRECT]; don't trip on missing
+    # Anthropic/Apify vars before the user has filled them in.
+    import logging  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     from . import migrate as _m  # noqa: PLC0415
     _m.run()
 
