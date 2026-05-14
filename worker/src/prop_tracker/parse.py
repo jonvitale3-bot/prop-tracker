@@ -77,7 +77,7 @@ Rules:
 - If line is not stated (e.g. "Tatum over"), set line=null but keep the play.
 - raw_quote: copy the exact phrase from the post (do not paraphrase).
 
-Today's date is {today_iso}. Posts that say "tonight" or "today" refer to this date.
+Today's date is __TODAY_ISO__. Posts that say "tonight" or "today" refer to this date.
 
 Return JSON only.
 """
@@ -138,7 +138,9 @@ def _call_claude(
     client: anthropic.Anthropic, model: str, text: str, posted_at: datetime
 ) -> dict[str, Any]:
     today_iso = date.today().isoformat()
-    system = _SYSTEM_PROMPT.format(today_iso=today_iso)
+    # Use str.replace not .format() because the prompt contains literal {} from
+    # the JSON example and Python's .format would mis-parse them.
+    system = _SYSTEM_PROMPT.replace("__TODAY_ISO__", today_iso)
     msg = client.messages.create(
         model=model,
         max_tokens=1024,

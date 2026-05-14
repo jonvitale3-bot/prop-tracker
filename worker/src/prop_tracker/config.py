@@ -18,7 +18,10 @@ from dotenv import load_dotenv
 _HERE = Path(__file__).resolve()
 _WORKER_DIR = _HERE.parents[2]
 _REPO_ROOT = _WORKER_DIR.parent
-load_dotenv(_REPO_ROOT / ".env", override=False)
+# override=True so values in .env beat any stale empty values inherited from
+# the parent shell (e.g. an exported but unset ANTHROPIC_API_KEY=). In prod
+# there's no .env file, so the Railway-injected env vars still win by default.
+load_dotenv(_REPO_ROOT / ".env", override=True)
 load_dotenv(_WORKER_DIR / ".env", override=True)
 
 
