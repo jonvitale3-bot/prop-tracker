@@ -14,13 +14,15 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Mention:
-    source: str           # 'reddit' | 'twitter'
-    source_id: str        # platform-native ID (used for dedup)
+    source: str                    # 'reddit' | 'twitter'
+    source_id: str                 # platform-native ID (used for dedup)
     author: str | None
     url: str | None
     posted_at: datetime
     raw_text: str
     engagement_score: int
+    source_method: str = "keyword_search"  # 'keyword_search' | 'handle_scrape'
+    author_tier: int | None = None         # 1-4 for handle_scrape; None otherwise
 
 
 def upsert_mentions(rows: Iterable[Mention]) -> tuple[int, int]:
@@ -34,10 +36,12 @@ def upsert_mentions(rows: Iterable[Mention]) -> tuple[int, int]:
 
     sql = """
         INSERT INTO mentions (
-            source, source_id, author, url, posted_at, raw_text, engagement_score
+            source, source_id, author, url, posted_at, raw_text,
+            engagement_score, source_method, author_tier
         ) VALUES (
             %(source)s, %(source_id)s, %(author)s, %(url)s,
-            %(posted_at)s, %(raw_text)s, %(engagement_score)s
+            %(posted_at)s, %(raw_text)s, %(engagement_score)s,
+            %(source_method)s, %(author_tier)s
         )
         ON CONFLICT (source, source_id) DO NOTHING
     """
@@ -53,6 +57,8 @@ def upsert_mentions(rows: Iterable[Mention]) -> tuple[int, int]:
                 "posted_at": r.posted_at,
                 "raw_text": r.raw_text,
                 "engagement_score": r.engagement_score,
+                "source_method": r.source_method,
+                "author_tier": r.author_tier,
             })
             inserted += cur.rowcount  # 1 on insert, 0 on conflict
         conn.commit()

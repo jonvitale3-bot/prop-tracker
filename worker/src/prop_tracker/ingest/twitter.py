@@ -1,45 +1,115 @@
-"""Twitter ingester via Apify.
+"""Twitter ingester (handle-based).
 
-Default actor: `kaitoeasyapi~twitter-x-data-tweet-scraper-pay-per-result-cheapest`
-which runs on the Apify free plan with pay-per-result pricing
-(~$0.30 / 1k tweets). Override with APIFY_TWITTER_ACTOR if you swap.
+Reads a curated YAML list of accounts at worker/config/twitter_accounts.yaml
+and scrapes the last 24h of *original* tweets (no retweets, no replies)
+from each handle via the kaitoeasyapi pay-per-result actor.
 
-If you swap actors, you may need to adjust `_build_input` and the field
-mapping in `_normalize` since each actor exposes slightly different shapes.
+Each tweet is stored in `mentions` verbatim with:
+    source         = 'twitter'
+    source_id      = tweet id (Apify's id field)
+    author         = handle (without the @)
+    posted_at      = tweet's createdAt
+    raw_text       = tweet text
+    engagement     = likes + retweets + replies
+    source_method  = 'handle_scrape'
+    author_tier    = 1/2/3/4 from YAML
+
+The parser runs separately on rows where parsed_at IS NULL.
+
+Per-handle logging includes: tweets returned, retweets filtered, replies
+filtered, original tweets inserted, duplicates skipped.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from ..apify import run_actor_sync
 from ..config import load_settings, require_apify
-from .common import Mention, coerce_int, coerce_str, upsert_mentions
-from . import twitter_queries
+from ..db import connect
+from .common import Mention, coerce_int, coerce_str
 
 log = logging.getLogger(__name__)
 
-MAX_ITEMS = int(os.environ.get("INGEST_LIMIT_PER_SOURCE", "200"))
+# kaitoeasyapi tweets out per *searchTerm*; we set this generously per handle.
+# Sharp accounts post a few times a day, public/brand accounts can post 50+.
+MAX_ITEMS_PER_HANDLE = int(os.environ.get("TWITTER_MAX_ITEMS_PER_HANDLE", "50"))
+
+# Twitter `since:YYYY-MM-DD` filter lookback window in days.
+# 2 days gives sharps (who don't tweet daily) a fair chance to show up.
+# Dedupe on tweet id means re-running over the same window is cheap.
+LOOKBACK_DAYS = int(os.environ.get("TWITTER_LOOKBACK_DAYS", "2"))
+
+_ACCOUNTS_PATH = Path(__file__).resolve().parents[3] / "config" / "twitter_accounts.yaml"
 
 
-def _build_input(queries: tuple[str, ...]) -> dict[str, Any]:
-    # kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest schema.
-    # Accepts a list of search terms; one tweet may match multiple terms but
-    # output is deduped on tweet id, so overlap is harmless.
+# ── account config ────────────────────────────────────────────
+
+def _load_accounts() -> list[dict[str, Any]]:
+    if not _ACCOUNTS_PATH.exists():
+        raise RuntimeError(f"Twitter accounts file not found: {_ACCOUNTS_PATH}")
+    with _ACCOUNTS_PATH.open() as f:
+        data = yaml.safe_load(f) or {}
+    accounts = data.get("accounts") or []
+    out: list[dict[str, Any]] = []
+    for a in accounts:
+        h = (a.get("handle") or "").strip().lstrip("@")
+        if not h:
+            continue
+        out.append({
+            "handle": h,
+            "tier": int(a.get("tier") or 0) or None,
+            "sport_focus": a.get("sport_focus"),
+            "notes": a.get("notes"),
+        })
+    return out
+
+
+# ── Apify input ───────────────────────────────────────────────
+
+def _build_search_terms(handles: list[str], since: date) -> list[str]:
+    iso = since.isoformat()
+    return [f"from:{h} since:{iso}" for h in handles]
+
+
+def _build_input(handles: list[str], since: date) -> dict[str, Any]:
     return {
-        "searchTerms": list(queries),
-        "maxItems": MAX_ITEMS,
-        "sort": "Latest",
-        "tweetLanguage": "en",
-        "onlyVerifiedUsers": False,
-        "onlyTwitterBlue": False,
-        "onlyImage": False,
-        "onlyVideo": False,
-        "onlyQuote": False,
+        "searchTerms": _build_search_terms(handles, since),
+        "maxItems": MAX_ITEMS_PER_HANDLE * len(handles),
+        "queryType": "Latest",
+        "lang": "en",
+        # The actor supports filter:replies / filter:nativeretweets, but we
+        # filter post-hoc too because some retweets/replies slip through
+        # depending on Twitter's search behavior.
     }
+
+
+# ── output classification ─────────────────────────────────────
+
+def _is_retweet(item: dict[str, Any]) -> bool:
+    if item.get("retweeted_tweet"):
+        return True
+    text = item.get("text") or ""
+    return text.startswith("RT @")
+
+
+def _is_reply(item: dict[str, Any]) -> bool:
+    if item.get("isReply") is True:
+        return True
+    if item.get("inReplyToId"):
+        return True
+    return False
+
+
+def _author_handle(item: dict[str, Any]) -> str | None:
+    a = item.get("author") or {}
+    return coerce_str(a.get("userName") or a.get("username") or a.get("screen_name"))
 
 
 def _parse_dt(v: Any) -> datetime:
@@ -57,77 +127,165 @@ def _parse_dt(v: Any) -> datetime:
             return datetime.now(timezone.utc)
 
 
-def _normalize(item: dict[str, Any]) -> Mention | None:
-    """Best-effort field mapping across common Twitter actor schemas."""
-    source_id = coerce_str(
-        item.get("id") or item.get("id_str") or item.get("tweetId")
-        or item.get("conversation_id")
-    )
-    if not source_id:
+def _to_mention(item: dict[str, Any], handle: str, tier: int | None) -> Mention | None:
+    source_id = coerce_str(item.get("id") or item.get("tweetId"))
+    text = coerce_str(item.get("text") or item.get("full_text") or item.get("fullText"))
+    if not source_id or not text:
         return None
 
-    text = coerce_str(
-        item.get("text") or item.get("full_text") or item.get("fullText")
-    )
-    if not text:
-        # Some actors nest text under legacy.full_text or similar
-        legacy = item.get("legacy")
-        if isinstance(legacy, dict):
-            text = coerce_str(legacy.get("full_text"))
-    if not text:
-        return None
-
-    author_obj = item.get("author") or item.get("user")
-    if isinstance(author_obj, dict):
-        author = coerce_str(
-            author_obj.get("userName") or author_obj.get("username")
-            or author_obj.get("screen_name") or author_obj.get("name")
-        )
-    else:
-        author = coerce_str(author_obj) or coerce_str(item.get("username"))
-
-    url = coerce_str(item.get("url") or item.get("twitterUrl") or item.get("tweetUrl"))
-    if not url and author and source_id:
-        url = f"https://x.com/{author}/status/{source_id}"
-
-    likes = coerce_int(item.get("likeCount") or item.get("favorite_count")
-                       or item.get("favoriteCount"))
+    likes = coerce_int(item.get("likeCount") or item.get("favorite_count"))
     rts = coerce_int(item.get("retweetCount") or item.get("retweet_count"))
     replies = coerce_int(item.get("replyCount") or item.get("reply_count"))
 
     return Mention(
         source="twitter",
         source_id=source_id,
-        author=author,
-        url=url,
-        posted_at=_parse_dt(item.get("createdAt") or item.get("created_at")
-                            or item.get("date")),
+        author=handle,
+        url=coerce_str(item.get("url") or item.get("twitterUrl"))
+            or f"https://x.com/{handle}/status/{source_id}",
+        posted_at=_parse_dt(item.get("createdAt") or item.get("created_at")),
         raw_text=text,
         engagement_score=likes + rts + replies,
+        source_method="handle_scrape",
+        author_tier=tier,
     )
 
+
+# ── DB helpers (per-handle dedup count) ───────────────────────
+
+def _existing_source_ids(source_ids: list[str]) -> set[str]:
+    if not source_ids:
+        return set()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_id FROM mentions WHERE source = 'twitter' AND source_id = ANY(%s)",
+            (source_ids,),
+        )
+        return {row["source_id"] for row in cur.fetchall()}
+
+
+def _insert_mentions(mentions: list[Mention]) -> int:
+    """Insert mentions one-by-one so the caller can count exact inserts
+    (different from upsert_mentions which is bulk-only-batched).
+    Returns count inserted."""
+    if not mentions:
+        return 0
+    sql = """
+        INSERT INTO mentions (
+            source, source_id, author, url, posted_at, raw_text,
+            engagement_score, source_method, author_tier
+        ) VALUES (
+            %(source)s, %(source_id)s, %(author)s, %(url)s,
+            %(posted_at)s, %(raw_text)s, %(engagement_score)s,
+            %(source_method)s, %(author_tier)s
+        )
+        ON CONFLICT (source, source_id) DO NOTHING
+    """
+    n = 0
+    with connect() as conn, conn.cursor() as cur:
+        for m in mentions:
+            cur.execute(sql, {
+                "source": m.source, "source_id": m.source_id,
+                "author": m.author, "url": m.url,
+                "posted_at": m.posted_at, "raw_text": m.raw_text,
+                "engagement_score": m.engagement_score,
+                "source_method": m.source_method, "author_tier": m.author_tier,
+            })
+            n += cur.rowcount
+        conn.commit()
+    return n
+
+
+# ── main entry ────────────────────────────────────────────────
 
 def run() -> None:
     settings = load_settings()
     token = require_apify(settings)
+    accounts = _load_accounts()
+    if not accounts:
+        log.warning("Twitter ingest: no accounts in YAML; nothing to do")
+        return
 
-    # Auto-build queries from tonight's NBA slate + static keywords + env extras.
-    # Set TWITTER_AUTO_QUERIES=0 to fall back to the literal TWITTER_QUERIES list.
-    if os.environ.get("TWITTER_AUTO_QUERIES", "1") == "1":
-        queries = tuple(twitter_queries.build_queries())
-    else:
-        queries = settings.twitter_queries
+    handles = [a["handle"] for a in accounts]
+    tier_by_handle = {a["handle"].lower(): a["tier"] for a in accounts}
 
-    log.info("Twitter ingest: %d queries actor=%s max=%d",
-             len(queries), settings.apify_twitter_actor, MAX_ITEMS)
+    since = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).date()
+    log.info(
+        "Twitter ingest (handle_scrape): %d accounts, since=%s, max_per_handle=%d, actor=%s",
+        len(handles), since.isoformat(), MAX_ITEMS_PER_HANDLE, settings.apify_twitter_actor,
+    )
 
     items = run_actor_sync(
         actor_id=settings.apify_twitter_actor,
         token=token,
-        actor_input=_build_input(queries),
+        actor_input=_build_input(handles, since),
     )
 
-    mentions = [m for m in (_normalize(it) for it in items) if m is not None]
-    log.info("Twitter ingest: %d items -> %d normalized mentions",
-             len(items), len(mentions))
-    upsert_mentions(mentions)
+    # Bucket by author (lowercased so case mismatches don't drop tweets).
+    by_handle: dict[str, list[dict[str, Any]]] = {h.lower(): [] for h in handles}
+    unknown: list[dict[str, Any]] = []
+    for it in items:
+        ah = (_author_handle(it) or "").lower()
+        if ah and ah in by_handle:
+            by_handle[ah].append(it)
+        else:
+            unknown.append(it)
+
+    if unknown:
+        log.warning("Twitter ingest: %d items had unknown/missing author", len(unknown))
+
+    total_returned = 0
+    total_rt_filtered = 0
+    total_reply_filtered = 0
+    total_kept = 0
+    total_inserted = 0
+    handles_with_zero: list[str] = []
+
+    for acct in accounts:
+        h = acct["handle"]
+        tier = acct["tier"]
+        bucket = by_handle.get(h.lower(), [])
+        returned = len(bucket)
+        total_returned += returned
+
+        rt_skipped = 0
+        reply_skipped = 0
+        normalized: list[Mention] = []
+        for it in bucket:
+            if _is_retweet(it):
+                rt_skipped += 1
+                continue
+            if _is_reply(it):
+                reply_skipped += 1
+                continue
+            m = _to_mention(it, h, tier)
+            if m is not None:
+                normalized.append(m)
+        total_rt_filtered += rt_skipped
+        total_reply_filtered += reply_skipped
+        total_kept += len(normalized)
+
+        # Dedup count = how many we *try* to insert that aren't already present.
+        existing = _existing_source_ids([m.source_id for m in normalized])
+        new_inserts_attempted = sum(1 for m in normalized if m.source_id not in existing)
+        inserted = _insert_mentions(normalized)
+        total_inserted += inserted
+
+        log.info(
+            "@%s [tier=%s]: returned=%d, rt_filtered=%d, reply_filtered=%d, "
+            "originals=%d, new_inserts=%d, dupes=%d",
+            h, tier, returned, rt_skipped, reply_skipped,
+            len(normalized), inserted, len(normalized) - inserted,
+        )
+        if returned == 0:
+            handles_with_zero.append(h)
+
+    log.info(
+        "Twitter ingest done: returned=%d, rt_filtered=%d, reply_filtered=%d, "
+        "originals=%d, inserted=%d, zero_volume_handles=%d",
+        total_returned, total_rt_filtered, total_reply_filtered,
+        total_kept, total_inserted, len(handles_with_zero),
+    )
+    if handles_with_zero:
+        log.warning("Twitter ingest: handles with 0 tweets returned: %s",
+                    ", ".join(handles_with_zero))

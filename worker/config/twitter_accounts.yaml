@@ -1,0 +1,71 @@
+accounts:
+  # Tier 1 - Sharps (cross-reference signal, not fade material)
+  - handle: capjack2000
+    tier: 1
+    sport_focus: multi
+    notes: Captain Jack Andrews, founded Unabated
+  - handle: haralabob
+    tier: 1
+    sport_focus: nba
+    notes: NBA specialist, sharp
+  - handle: AlexMonahan100
+    tier: 1
+    sport_focus: multi
+    notes: Former SIG quant
+  - handle: ToddFuhrman
+    tier: 1
+    sport_focus: multi
+    notes: Former Caesars oddsmaker
+  - handle: robpizzola
+    tier: 1
+    sport_focus: multi
+    notes: Pro bettor, Circles Off podcast
+
+  # Tier 2 - High-volume public picks (fade candidates)
+  - handle: jimmysportpicks
+    tier: 2
+    sport_focus: multi
+    notes: 200K+ followers, daily free picks
+  - handle: tmathsports
+    tier: 2
+    sport_focus: multi
+    notes: 200K+ followers
+  - handle: dangambleai
+    tier: 2
+    sport_focus: multi
+    notes: 330K+ followers
+  - handle: catburglarpicks
+    tier: 2
+    sport_focus: multi
+    notes: Daily free picks
+  - handle: HeedTheseTakes
+    tier: 2
+    sport_focus: multi
+    notes: Gambling Twitter mainstay
+
+  # Tier 3 - Brands/aggregators
+  - handle: ActionNetworkHQ
+    tier: 3
+    sport_focus: multi
+  - handle: OddsShark
+    tier: 3
+    sport_focus: multi
+  - handle: CoversExperts
+    tier: 3
+    sport_focus: multi
+  - handle: ScoresOdds
+    tier: 3
+    sport_focus: multi
+  - handle: VegasInsider
+    tier: 3
+    sport_focus: multi
+
+  # Tier 4 - NBA-specific
+  - handle: Hardwood_Paroxysm
+    tier: 4
+    sport_focus: nba
+    notes: Action Network NBA writer
+  - handle: erinkatedolan
+    tier: 4
+    sport_focus: nba
+    notes: ESPN betting analyst

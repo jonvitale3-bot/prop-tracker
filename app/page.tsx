@@ -7,10 +7,15 @@ import { getHotSubjects, getStats, getTonightsPlays, todayET } from "@/lib/queri
 // requiring a hard refresh.
 export const revalidate = 60;
 
-export default async function Home() {
+export default async function Home(
+  { searchParams }: { searchParams: Promise<{ includeKeyword?: string }> },
+) {
+  const params = await searchParams;
+  const includeKeyword = params?.includeKeyword === "1";
+
   const [plays, hot, allTime, last7] = await Promise.all([
-    getTonightsPlays(1),  // show all player props; mention_count column shows consensus
-    getHotSubjects(1),    // grouped by subject+market+side, all (sort by mention count)
+    getTonightsPlays(1, includeKeyword),
+    getHotSubjects(1, includeKeyword),
     getStats(null),
     getStats(7),
   ]);
@@ -26,14 +31,22 @@ export default async function Home() {
             Public sentiment vs. results · {today}
           </p>
         </div>
-        <a
-          href="https://github.com/jonvitale3-bot/prop-tracker"
-          target="_blank"
-          rel="noreferrer"
-          className="text-xs text-neutral-500 hover:text-neutral-300"
-        >
-          source
-        </a>
+        <div className="flex items-center gap-4">
+          <a
+            href={includeKeyword ? "/" : "/?includeKeyword=1"}
+            className="text-xs text-neutral-500 hover:text-neutral-300"
+          >
+            {includeKeyword ? "hide keyword data" : "include keyword data"}
+          </a>
+          <a
+            href="https://github.com/jonvitale3-bot/prop-tracker"
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-neutral-500 hover:text-neutral-300"
+          >
+            source
+          </a>
+        </div>
       </header>
 
       <StatStrip allTime={allTime} last7={last7} />

@@ -39,22 +39,48 @@ export function todayET(): string {
 }
 const todayISO = todayET;
 
-export async function getTonightsPlays(minMentions: number = 2): Promise<PlayRow[]> {
-  // minMentions filter drops "lone wolf" picks (single tweets). public_pct is
-  // meaningless until at least a couple people weigh in on the same bet.
+export async function getTonightsPlays(
+  minMentions: number = 1,
+  includeKeyword: boolean = false,
+): Promise<PlayRow[]> {
+  // Default: only show plays supported by at least one handle_scrape mention.
+  // includeKeyword=true brings in the legacy keyword-search data.
   // subject_kind='player' filters out moneyline / spread / total team bets.
+  // mention_count is recomputed from the filtered mention set.
   const today = todayISO();
-  const rows = (await sql`
-    SELECT id, sport, game_date::text AS game_date, subject, subject_kind,
-           market, line::float8 AS line, side, mention_count,
-           public_pct::float8 AS public_pct, avg_conviction::float8 AS avg_conviction
-    FROM plays
-    WHERE game_date = ${today}
-      AND subject_kind = 'player'
-      AND mention_count >= ${minMentions}
-    ORDER BY mention_count DESC, avg_conviction DESC NULLS LAST, id DESC
-    LIMIT 100
-  `) as unknown as PlayRow[];
+  const rows = includeKeyword
+    ? ((await sql`
+        SELECT p.id, p.sport, p.game_date::text AS game_date, p.subject, p.subject_kind,
+               p.market, p.line::float8 AS line, p.side,
+               COUNT(DISTINCT pm.mention_id)::int AS mention_count,
+               p.public_pct::float8 AS public_pct,
+               p.avg_conviction::float8 AS avg_conviction
+        FROM plays p
+        JOIN play_mentions pm ON pm.play_id = p.id
+        WHERE p.game_date = ${today}
+          AND p.subject_kind = 'player'
+        GROUP BY p.id
+        HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
+        ORDER BY mention_count DESC, p.avg_conviction DESC NULLS LAST, p.id DESC
+        LIMIT 100
+      `) as unknown as PlayRow[])
+    : ((await sql`
+        SELECT p.id, p.sport, p.game_date::text AS game_date, p.subject, p.subject_kind,
+               p.market, p.line::float8 AS line, p.side,
+               COUNT(DISTINCT pm.mention_id)::int AS mention_count,
+               p.public_pct::float8 AS public_pct,
+               p.avg_conviction::float8 AS avg_conviction
+        FROM plays p
+        JOIN play_mentions pm ON pm.play_id = p.id
+        JOIN mentions m ON m.id = pm.mention_id
+        WHERE p.game_date = ${today}
+          AND p.subject_kind = 'player'
+          AND m.source_method = 'handle_scrape'
+        GROUP BY p.id
+        HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
+        ORDER BY mention_count DESC, p.avg_conviction DESC NULLS LAST, p.id DESC
+        LIMIT 100
+      `) as unknown as PlayRow[]);
   return rows;
 }
 
@@ -75,24 +101,47 @@ export type HotSubject = {
  * get combined. Surfaces consensus on a *direction* (subject + market + side)
  * even when posters disagree on the exact number.
  */
-export async function getHotSubjects(minMentions: number = 3): Promise<HotSubject[]> {
-  // Player props only. Team markets (spread/total/moneyline) are excluded.
+export async function getHotSubjects(
+  minMentions: number = 1,
+  includeKeyword: boolean = false,
+): Promise<HotSubject[]> {
+  // Player props only. Default to handle_scrape data; toggle via includeKeyword.
   const today = todayISO();
-  const rows = (await sql`
-    SELECT sport, subject, market, side,
-           SUM(mention_count)::int AS total_mentions,
-           COUNT(DISTINCT line)::int AS distinct_lines,
-           MIN(line)::float8 AS min_line,
-           MAX(line)::float8 AS max_line,
-           AVG(avg_conviction)::float8 AS avg_conviction
-    FROM plays
-    WHERE game_date = ${today}
-      AND subject_kind = 'player'
-    GROUP BY sport, subject, market, side
-    HAVING SUM(mention_count) >= ${minMentions}
-    ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
-    LIMIT 50
-  `) as unknown as HotSubject[];
+  const rows = includeKeyword
+    ? ((await sql`
+        SELECT p.sport, p.subject, p.market, p.side,
+               COUNT(DISTINCT pm.mention_id)::int AS total_mentions,
+               COUNT(DISTINCT p.line)::int AS distinct_lines,
+               MIN(p.line)::float8 AS min_line,
+               MAX(p.line)::float8 AS max_line,
+               AVG(p.avg_conviction)::float8 AS avg_conviction
+        FROM plays p
+        JOIN play_mentions pm ON pm.play_id = p.id
+        WHERE p.game_date = ${today}
+          AND p.subject_kind = 'player'
+        GROUP BY p.sport, p.subject, p.market, p.side
+        HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
+        ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
+        LIMIT 50
+      `) as unknown as HotSubject[])
+    : ((await sql`
+        SELECT p.sport, p.subject, p.market, p.side,
+               COUNT(DISTINCT pm.mention_id)::int AS total_mentions,
+               COUNT(DISTINCT p.line)::int AS distinct_lines,
+               MIN(p.line)::float8 AS min_line,
+               MAX(p.line)::float8 AS max_line,
+               AVG(p.avg_conviction)::float8 AS avg_conviction
+        FROM plays p
+        JOIN play_mentions pm ON pm.play_id = p.id
+        JOIN mentions m ON m.id = pm.mention_id
+        WHERE p.game_date = ${today}
+          AND p.subject_kind = 'player'
+          AND m.source_method = 'handle_scrape'
+        GROUP BY p.sport, p.subject, p.market, p.side
+        HAVING COUNT(DISTINCT pm.mention_id) >= ${minMentions}
+        ORDER BY total_mentions DESC, avg_conviction DESC NULLS LAST
+        LIMIT 50
+      `) as unknown as HotSubject[]);
   return rows;
 }
 
