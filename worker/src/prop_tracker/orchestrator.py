@@ -70,6 +70,11 @@ def main() -> None:
 
         _safe("parse-mentions", parse.run)
 
+        # Pin newly-surfaced leans so they can't disappear before grading.
+        # Runs right after parse so a lean is locked the same cycle it appears.
+        from . import surface  # noqa: PLC0415
+        _safe("pin-surfaced", surface.run)
+
         # Grade once per day, on the first cycle at/after the configured hour.
         now_et = datetime.now(_ET)
         today_et = now_et.date()

@@ -13,13 +13,19 @@ from The Odds API.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import espn
 from .db import connect
 
 log = logging.getLogger(__name__)
+
+# Game dates are anchored to US/Eastern (see parse.py). "Today" for the grader
+# must use the same clock, or a server on UTC treats a still-in-progress ET
+# evening game as "yesterday" and grades it before it is final.
+_ET = ZoneInfo("America/New_York")
 
 # Markets we can grade directly from ESPN box-score keys (NBA).
 _NBA_STAT_KEYS: dict[str, list[str]] = {
@@ -41,7 +47,7 @@ _UNGRADEABLE_MARKETS = {"fantasy_points", "double_double", "triple_double"}
 
 
 def _ungraded_plays() -> list[dict[str, Any]]:
-    today = date.today()
+    today = datetime.now(_ET).date()
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -115,7 +121,15 @@ def _find_event_and_team(sport: str, game_date: date, subject: str) -> tuple[dic
     return None, None
 
 
-def _grade_player_prop(play: dict[str, Any]) -> tuple[float | None, bool | None, bool, str | None]:
+def _grade_player_prop(
+    play: dict[str, Any],
+) -> tuple[float | None, bool | None, bool, str | None] | None:
+    """Grade a player prop.
+
+    Returns a (actual, public_won, push, notes) tuple to record, or None to
+    signal "not final yet — skip and retry next run" so an in-progress game is
+    never frozen as a voided result.
+    """
     sport = play["sport"]
     if sport != "NBA":
         return None, None, False, f"{sport} player props not supported yet"
@@ -128,17 +142,27 @@ def _grade_player_prop(play: dict[str, Any]) -> tuple[float | None, bool | None,
     if not keys:
         return None, None, False, f"unknown player market '{market}'"
 
-    # Find a game on the date that contains this player. Easier path: look up
-    # box scores for every game on the date until we hit a match.
+    # Only grade off games that have FINISHED. If a game on this date is still
+    # pending and we can't find the player in a completed box score, skip and
+    # retry later rather than voiding the play.
     events = espn.get_scoreboard(sport, play["game_date"])
+    any_pending = any(
+        not bool((ev.get("status") or {}).get("type", {}).get("completed"))
+        for ev in events
+    )
     stats: dict[str, float | None] | None = None
     for ev in events:
+        completed = bool((ev.get("status") or {}).get("type", {}).get("completed"))
+        if not completed:
+            continue
         summary = espn.get_summary(sport, ev["id"])
         stats = espn.find_player_in_summary(summary, play["subject"])
         if stats is not None:
             break
 
     if stats is None:
+        if any_pending:
+            return None  # a game on this date is still in progress; retry later
         return None, None, False, f"player '{play['subject']}' not found in box scores"
 
     if stats.get("__did_not_play__"):
@@ -168,7 +192,11 @@ def _grade_player_prop(play: dict[str, Any]) -> tuple[float | None, bool | None,
     return actual, public_won, push, None
 
 
-def _grade_team_market(play: dict[str, Any]) -> tuple[float | None, bool | None, bool, str | None]:
+def _grade_team_market(
+    play: dict[str, Any],
+) -> tuple[float | None, bool | None, bool, str | None] | None:
+    """Grade a team market. Returns None to signal "not final yet — skip and
+    retry" so an in-progress game is never frozen as a voided result."""
     sport = play["sport"]
     market = play["market"]
     side = play["side"]
@@ -178,10 +206,10 @@ def _grade_team_market(play: dict[str, Any]) -> tuple[float | None, bool | None,
     if ev is None or team is None:
         return None, None, False, f"team '{play['subject']}' not found in scoreboard"
 
-    # Game completed?
+    # Game completed? If not, skip and retry rather than voiding.
     status = (ev.get("status") or {}).get("type", {}).get("completed")
     if not status:
-        return None, None, False, "game not completed"
+        return None  # not final yet; retry next run
 
     if market == "total":
         total = float(team["total_score"])
@@ -210,19 +238,29 @@ def run() -> None:
 
     graded = 0
     voided = 0
+    skipped = 0
     errors = 0
 
     for play in plays:
         try:
             if play["subject_kind"] == "player":
-                actual, public_won, push, notes = _grade_player_prop(play)
+                outcome = _grade_player_prop(play)
             else:
-                actual, public_won, push, notes = _grade_team_market(play)
+                outcome = _grade_team_market(play)
         except Exception as e:  # noqa: BLE001
             log.exception("grade: play %d crashed: %s", play["id"], e)
-            actual, public_won, push, notes = None, None, False, f"grader error: {e!s}"[:480]
+            outcome = (None, None, False, f"grader error: {e!s}"[:480])
             errors += 1
 
+        # None => game not final yet. Leave the play ungraded so it retries on
+        # a later cycle instead of being frozen as a voided result. This is
+        # what keeps a surfaced lean gradeable through to a real outcome.
+        if outcome is None:
+            skipped += 1
+            log.info("grade: play %d not final yet -- will retry", play["id"])
+            continue
+
+        actual, public_won, push, notes = outcome
         _insert_result(play["id"], actual, public_won, push, notes)
         if public_won is None:
             voided += 1
@@ -235,4 +273,7 @@ def run() -> None:
                 play["id"], result, actual, play["line"], play["side"],
             )
 
-    log.info("grade: done. graded=%d voided=%d errors=%d", graded, voided, errors)
+    log.info(
+        "grade: done. graded=%d voided=%d skipped=%d errors=%d",
+        graded, voided, skipped, errors,
+    )

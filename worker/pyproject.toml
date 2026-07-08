@@ -22,6 +22,7 @@ dev = [
 ingest-reddit  = "prop_tracker.cli:ingest_reddit"
 ingest-twitter = "prop_tracker.cli:ingest_twitter"
 parse-mentions = "prop_tracker.cli:parse_mentions"
+pin-surfaced   = "prop_tracker.cli:pin_surfaced"
 grade-results  = "prop_tracker.cli:grade_results"
 migrate        = "prop_tracker.cli:migrate"
 worker-loop    = "prop_tracker.cli:worker_loop"

@@ -48,13 +48,18 @@ export async function getTonightsPlays(
   // subject_kind='player' filters out moneyline / spread / total team bets.
   // mention_count is recomputed from the filtered mention set.
   //
-  // Two additional filters since the game_date fix:
-  //   1) legacy_game_date = FALSE — drop plays parsed before the
-  //      ET-anchor fix; their game_date is typically +1 day off.
-  //   2) NOT EXISTS (results) — drop plays that have already been
-  //      graded so a finished game doesn't linger in "tonight."
-  //      (Cheaper than a game_status column; revisit when we have
-  //      in_progress data from the Odds API integration.)
+  // The default view keys off surfaced_at (set by the worker's pin step the
+  // first time a play meets these criteria) rather than re-deriving
+  // eligibility live. Once a lean has been surfaced it stays on the board
+  // until it is genuinely graded, so it can't silently disappear before tip
+  // if the underlying data shifts. surfaced_at is only ever set on
+  // non-legacy plays, so it also subsumes the old legacy_game_date filter.
+  //   NOT EXISTS (results) — drop plays that have already been graded so a
+  //   finished game doesn't linger in "tonight." The grader no longer writes
+  //   a result for an in-progress game, so this can't fire before the game
+  //   is actually final.
+  // includeKeyword stays a live (unpinned) debug view of everything, incl.
+  // legacy keyword data.
   const today = todayISO();
   const rows = includeKeyword
     ? ((await sql`
@@ -85,7 +90,7 @@ export async function getTonightsPlays(
         JOIN mentions m ON m.id = pm.mention_id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
-          AND p.legacy_game_date = FALSE
+          AND p.surfaced_at IS NOT NULL
           AND m.source_method = 'handle_scrape'
           AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.id
@@ -151,7 +156,7 @@ export async function getHotSubjects(
         JOIN mentions m ON m.id = pm.mention_id
         WHERE p.game_date = ${today}
           AND p.subject_kind = 'player'
-          AND p.legacy_game_date = FALSE
+          AND p.surfaced_at IS NOT NULL
           AND m.source_method = 'handle_scrape'
           AND NOT EXISTS (SELECT 1 FROM results r WHERE r.play_id = p.id)
         GROUP BY p.sport, p.subject, p.market, p.side

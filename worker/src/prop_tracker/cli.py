@@ -42,6 +42,12 @@ def parse_mentions() -> None:
     _p.run()
 
 
+def pin_surfaced() -> None:
+    _bootstrap()
+    from . import surface as _s  # noqa: PLC0415
+    _s.run()
+
+
 def grade_results() -> None:
     _bootstrap()
     from . import grade as _g  # noqa: PLC0415
